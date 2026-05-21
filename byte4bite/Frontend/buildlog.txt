@@ -1,0 +1,18 @@
+
+> byte4bite@0.1.0 build
+> next build
+
+   ▲ Next.js 15.5.14
+
+   Creating an optimized production build ...
+ ✓ Compiled successfully in 2.6s
+   Linting and checking validity of types ...
+   Collecting page data ...
+   Generating static pages (0/6) ...
+TypeError: a[d] is not a function
+    at Object.c [as require] (c:\PROJECT FINAL SEM\byte4bite\Frontend\.next\server\webpack-runtime.js:1:127)
+Error occurred prerendering page "/dashboard". Read more: https://nextjs.org/docs/messages/prerender-error
+TypeError: a[d] is not a function
+    at Object.c [as require] (c:\PROJECT FINAL SEM\byte4bite\Frontend\.next\server\webpack-runtime.js:1:127)
+Export encountered an error on /dashboard/page: /dashboard, exiting the build.
+ ⨯ Next.js build worker exited with code: 1 and signal: null
