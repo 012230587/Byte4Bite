@@ -10,18 +10,30 @@ router = APIRouter()
 @router.get("/", response_model=List[RecipeResponse])
 async def get_recipes(
     ingredients: Optional[str] = Query(None),
+    restrictions: Optional[List[str]] = Query(None),
     restriction: Optional[str] = Query(None)
 ):
     """Standard Search: Finds matching recipes from CSV."""
-    return recipe_service.get_personalized_recipes(ingredients, restriction)
+    effective_restrictions = list(restrictions or [])
+    if restriction:
+        effective_restrictions.append(restriction)
+    if not effective_restrictions:
+        effective_restrictions = None
+    return recipe_service.get_personalized_recipes(ingredients, effective_restrictions)
 
 @router.get("/chat")
 async def chat_with_ai(
-    ingredients: str, 
-    restriction: Optional[str] = None
+    ingredients: str,
+    restrictions: Optional[List[str]] = Query(None),
+    restriction: Optional[str] = Query(None)
 ):
     """AI Chat: Finds a recipe and adjusts it for dietary needs."""
-    return recipe_service.get_personalized_recommendation(ingredients, restriction)
+    effective_restrictions = list(restrictions or [])
+    if restriction:
+        effective_restrictions.append(restriction)
+    if not effective_restrictions:
+        effective_restrictions = None
+    return recipe_service.get_personalized_recommendation(ingredients, effective_restrictions)
 
 @router.post("/generate-detail")
 def get_ai_details(recipe: dict):
@@ -47,17 +59,36 @@ def generate_recipe(user_input: dict):
     """
     Generate recipes based on query: if recipe name, paraphrase existing; if ingredient, suggest paraphrased recipes.
     """
+    restrictions = None
     try:
         user_query = user_input.get("query", "").strip()
         if not user_query:
             return {"error": "Please provide a query", "recipes": []}
-        
+
+        restrictions = user_input.get("restrictions")
+        if isinstance(restrictions, str):
+            restrictions = [restrictions]
         restriction = user_input.get("restriction") if isinstance(user_input, dict) else None
-        recipes = ai_service.generate_new_recipe_from_query(user_query, None, restriction)
+        if restriction:
+            restrictions = [*(restrictions or []), restriction]
+
+        if restrictions and not isinstance(restrictions, list):
+            restrictions = [restrictions]
+
+        cuisine = (user_input.get("cuisine") or "").strip() or None
+
+        recipes = ai_service.generate_new_recipe_from_query(
+            user_query, None, restrictions, cuisine=cuisine
+        )
         return {"recipes": recipes, "is_generated": True}
     except Exception as e:
         print(f"DEBUG: generate failed: {e}")
-        fallback = ai_service._fallback_generated_recipe(user_input.get("query", "chicken"))
+        cuisine = (user_input.get("cuisine") or "").strip() or None
+        fallback = ai_service._fallback_generated_recipe(
+            user_input.get("query", "chicken"),
+            restrictions if isinstance(restrictions, list) else None,
+            cuisine,
+        )
         return {"recipes": [fallback], "is_generated": True, "error": str(e)}
 
 @router.post("/memory/save")

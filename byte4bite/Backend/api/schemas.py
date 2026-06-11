@@ -10,6 +10,8 @@ class RecipeBase(BaseModel):
     prep_time: str = "20 mins"
     difficulty: str = "Easy"
     dietary_tags: List[str] = []
+    cuisine: Optional[str] = None
+    is_generated: Optional[bool] = None
 
 class RecipeResponse(RecipeBase):
     id: Optional[int] = None

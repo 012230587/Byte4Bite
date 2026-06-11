@@ -8,6 +8,7 @@ interface RecipeDetailProps {
     difficulty?: string;
     dietary_tags?: string[];
     is_generated?: boolean;
+    cuisine?: string;
   } | null;
   statusMessage?: string;
 }
@@ -34,12 +35,11 @@ export default function RecipeDetail({ recipe, statusMessage }: RecipeDetailProp
   const instructions = Array.isArray(recipe.instructions)
     ? recipe.instructions.filter(Boolean)
     : typeof recipe.instructions === "string"
-    ? [recipe.instructions.trim()]
+    ? recipe.instructions
+        .split(/\n+|(?<=\.)\s+(?=\d+[\).]\s+)/)
+        .map((s) => s.trim())
+        .filter(Boolean)
     : [];
-
-  const instructionsText = instructions
-    .map((step, index) => `${index + 1}. ${step}`)
-    .join("\n\n");
 
   return (
     <div className="rounded-[2rem] border border-slate-200 bg-white/95 p-6 shadow-sm shadow-slate-200">
@@ -47,6 +47,9 @@ export default function RecipeDetail({ recipe, statusMessage }: RecipeDetailProp
         <div>
           <h2 className="text-2xl font-bold text-slate-900">{recipe.title}</h2>
           <p className="mt-2 text-slate-600">{recipe.description || "A chef-crafted recipe ready for your kitchen."}</p>
+          {recipe.cuisine ? (
+            <p className="mt-2 text-xs uppercase tracking-[0.2em] text-emerald-600">{recipe.cuisine} cuisine</p>
+          ) : null}
         </div>
         <div className="rounded-3xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm">
           {recipe.is_generated ? "AI-Generated" : "Recipe"}
@@ -87,9 +90,13 @@ export default function RecipeDetail({ recipe, statusMessage }: RecipeDetailProp
 
       <section>
         <h3 className="text-lg font-semibold text-slate-900 mb-3">Cooking Steps</h3>
-        <div className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm">
-          <p className="whitespace-pre-wrap text-slate-700 leading-relaxed">{instructionsText}</p>
-        </div>
+        <ol className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm list-decimal list-outside ms-5 space-y-4">
+          {instructions.map((step, index) => (
+            <li key={`step-${index}`} className="text-slate-700 leading-relaxed ps-2">
+              {step.replace(/^\s*\d+[\).]\s*/, "")}
+            </li>
+          ))}
+        </ol>
       </section>
 
       {statusMessage ? (

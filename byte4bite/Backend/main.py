@@ -1,24 +1,56 @@
+import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load Backend/.env before any service reads GEMINI_API_KEY
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+AUTO_INGEST_ON_STARTUP = os.getenv("AUTO_INGEST_ON_STARTUP", "true").lower() in {"1", "true", "yes"}
+REFRESH_DATASETS_ON_STARTUP = os.getenv("REFRESH_DATASETS_ON_STARTUP", "false").lower() in {"1", "true", "yes"}
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from api import recipes
+from api import auth, recipes
 from services import recipe_service
 
 app = FastAPI(title="Byte4Bite AI")
 
 @app.on_event("startup")
 def startup_load_recipes():
-    # Preload and clean datasets using heuristic column mapping
+    # Verify MySQL connection, auto-sync new datasets, log corpus size
+    from database.connection import ping_database
+    if ping_database():
+        print("DEBUG: MySQL connection OK")
+        if AUTO_INGEST_ON_STARTUP:
+            try:
+                if REFRESH_DATASETS_ON_STARTUP:
+                    from rag.ingest import refresh_datasets_from_folder
+                    stats = refresh_datasets_from_folder(no_embed=True, clear_saved=True)
+                else:
+                    from rag.ingest import sync_new_datasets
+                    stats = sync_new_datasets(no_embed=True)
+                if stats.get("inserted", 0) > 0 or stats.get("removed_old_rows", 0) > 0:
+                    recipe_service.invalidate_recipe_cache()
+            except Exception as exc:
+                print(f"DEBUG: Auto dataset sync failed: {exc}")
+    else:
+        print("DEBUG: MySQL unavailable — check .env and run database/schema.sql")
     recipe_service.preload_recipes()
 
 # This is the "Security Pass"
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"], # Allows your frontend to talk to it
+    allow_origins=[
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:3001", "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
 app.include_router(recipes.router, prefix="/api/recipes", tags=["Recipes"])
 
 @app.get("/")
