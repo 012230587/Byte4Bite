@@ -1,9 +1,15 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
-import RecipeCard from "@/components/RecipeCard";
+
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import RecipeDetail from "@/components/RecipeDetail";
 import Loader from "@/components/Loader";
-import { authFetch, getUser } from "@/services/auth";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  parseApiError,
+  recipeFetch,
+  saveRecipeToAccount,
+} from "@/services/auth";
 
 interface Recipe {
   title: string;
@@ -17,53 +23,73 @@ interface Recipe {
   is_generated?: boolean;
   inspired_by?: string[];
   retrieval_note?: string;
-  similarity_score?: number;
-  search_mode?: string;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
-const CUISINE_OPTIONS = [
-  { value: "", label: "Any cuisine" },
-  { value: "indian", label: "Indian" },
-  { value: "italian", label: "Italian" },
-  { value: "mexican", label: "Mexican" },
-  { value: "chinese", label: "Chinese" },
-  { value: "japanese", label: "Japanese" },
-  { value: "thai", label: "Thai" },
-  { value: "mediterranean", label: "Mediterranean" },
-  { value: "korean", label: "Korean" },
-  { value: "middle eastern", label: "Middle Eastern" },
-  { value: "american", label: "American" },
-  { value: "french", label: "French" },
-  { value: "pakistani", label: "Pakistani" },
-  { value: "fusion", label: "Fusion" },
+const CUISINE_GROUPS = [
+  {
+    label: "Popular",
+    options: [
+      { value: "", label: "Any cuisine" },
+      { value: "italian", label: "Italian" },
+      { value: "indian", label: "Indian" },
+      { value: "thai", label: "Thai" },
+      { value: "mexican", label: "Mexican" },
+      { value: "chinese", label: "Chinese" },
+      { value: "japanese", label: "Japanese" },
+      { value: "korean", label: "Korean" },
+    ],
+  },
+  {
+    label: "More styles",
+    options: [
+      { value: "mediterranean", label: "Mediterranean" },
+      { value: "middle eastern", label: "Middle Eastern" },
+      { value: "french", label: "French" },
+      { value: "american", label: "American" },
+      { value: "greek", label: "Greek" },
+      { value: "vietnamese", label: "Vietnamese" },
+      { value: "spanish", label: "Spanish" },
+      { value: "pakistani", label: "Pakistani" },
+      { value: "filipino", label: "Filipino" },
+      { value: "asian", label: "Asian" },
+      { value: "fusion", label: "Fusion" },
+    ],
+  },
+];
+
+const ALL_CUISINES = CUISINE_GROUPS.flatMap((group) => group.options);
+
+const DIETARY_OPTIONS = [
+  { value: "vegetarian", label: "Vegetarian" },
+  { value: "vegan", label: "Vegan" },
+  { value: "halal", label: "Halal" },
+  { value: "gluten-free", label: "Gluten-free" },
 ];
 
 export default function Dashboard() {
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
-  const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [searchIngredients, setSearchIngredients] = useState("");
+  const { user, isAuthenticated, loading: authLoading, profile } = useAuth();
+  const prefsApplied = useRef(false);
+  const [pantryInput, setPantryInput] = useState("");
   const [cuisine, setCuisine] = useState("");
   const [dietaryRestrictions, setDietaryRestrictions] = useState<string[]>([]);
-  const [searching, setSearching] = useState(false);
+  const [recipe, setRecipe] = useState<Recipe | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generateError, setGenerateError] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<string>("");
-  const [botMessage, setBotMessage] = useState<string>("");
-  const [browseMessage, setBrowseMessage] = useState<string>("");
-  const [hasSearched, setHasSearched] = useState(false);
-  const [lastSearchQuery, setLastSearchQuery] = useState("");
+  const [saveStatus, setSaveStatus] = useState("");
+  const [botMessage, setBotMessage] = useState("");
+  const [lastQuery, setLastQuery] = useState("");
 
-  const dietaryOptions = [
-    { value: "vegetarian", label: "Vegetarian" },
-    { value: "vegan", label: "Vegan" },
-    { value: "halal", label: "Halal" },
-    { value: "gluten-free", label: "Gluten-free" },
-  ];
+  useEffect(() => {
+    if (authLoading || prefsApplied.current || !profile) return;
+    const restriction = profile.dietary_restriction;
+    if (restriction && ["vegetarian", "vegan", "halal", "gluten-free"].includes(restriction)) {
+      setDietaryRestrictions((prev) =>
+        prev.includes(restriction) ? prev : [...prev, restriction]
+      );
+    }
+    prefsApplied.current = true;
+  }, [authLoading, profile]);
 
   const toggleRestriction = (value: string) => {
     setDietaryRestrictions((prev) =>
@@ -71,335 +97,271 @@ export default function Dashboard() {
     );
   };
 
-  const fetchRecipes = useCallback(async (ingredientsQuery: string = "") => {
-    setLoading(true);
-    setError(null);
-    setBotMessage("");
-    try {
-      const queryParams = new URLSearchParams();
-      if (ingredientsQuery) queryParams.set("ingredients", ingredientsQuery);
-      dietaryRestrictions.forEach((restriction) => queryParams.append("restrictions", restriction));
-      const query = queryParams.toString() ? `?${queryParams.toString()}` : "";
-      const res = await fetch(`${API_BASE}/api/recipes${query}`);
-      if (!res.ok) throw new Error(`Server responded with ${res.status}`);
-      const data = await res.json();
-      const list = Array.isArray(data) ? data.slice(0, 20) : [];
-      setRecipes(list);
-      if (list.length > 0) {
-        setSelectedRecipe(list[0]);
-        setSelectedIndex(0);
-        setBrowseMessage(
-          ingredientsQuery
-            ? `Similar recipes in our database (${list.length} ranked matches).`
-            : "Browse recipes from the dataset corpus."
-        );
-      } else {
-        setSelectedRecipe(null);
-        setSelectedIndex(null);
-        setBrowseMessage(
-          ingredientsQuery
-            ? "No close dataset matches — try Generate for a tailored recipe."
-            : ""
-        );
-      }
-    } catch (err) {
-      console.error("Connection error:", err);
-      setError("Failed to connect to the recipe server. Please ensure the backend is running at http://127.0.0.1:8000");
-    } finally {
-      setLoading(false);
-    }
-  }, [dietaryRestrictions]);
-
-  useEffect(() => {
-    fetchRecipes();
-  }, [fetchRecipes]);
-
-  const handleSearch = async () => {
-    const query = searchIngredients.trim();
-    setSearching(true);
-    setHasSearched(true);
-    setLastSearchQuery(query);
-    await fetchRecipes(query);
-    setSearching(false);
-  };
-
-  const handleGenerateRecipe = async () => {
-    const query = searchIngredients.trim() || lastSearchQuery;
+  const handleGetRecipe = async () => {
+    const query = pantryInput.trim();
     if (!query) {
-      setGenerateError("Enter your ingredients (comma-separated) before generating.");
+      setError("Tell us what is in your pantry — e.g. chicken, rice, garlic, spinach.");
       return;
     }
 
-    setIsGenerating(true);
-    setGenerateError(null);
+    setIsLoading(true);
+    setError(null);
     setSaveStatus("");
-    setBrowseMessage("");
-    setBotMessage("Found similar recipes · composing your tailored dish…");
+    setRecipe(null);
+    setBotMessage("Finding similar dishes in our corpus and composing your recipe…");
+    setLastQuery(query);
 
     try {
-      const response = await fetch(`${API_BASE}/api/recipes/generate`, {
+      const response = await recipeFetch("/api/recipes/generate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           query,
           restrictions: dietaryRestrictions,
           cuisine: cuisine || undefined,
         }),
       });
+
+      if (!response.ok) {
+        throw new Error(`Server responded with ${response.status}`);
+      }
+
       const data = await response.json();
+
       if (data.error && (!data.recipes || data.recipes.length === 0)) {
-        setGenerateError(data.error);
+        setError(data.error);
         setBotMessage("");
         return;
       }
-      if (data.recipes && data.recipes.length > 0) {
+
+      if (data.recipes?.length > 0) {
         const generated = {
           ...data.recipes[0],
           inspired_by: data.inspired_by || data.recipes[0].inspired_by,
           retrieval_note: data.retrieval_note || data.recipes[0].retrieval_note,
         } as Recipe;
-        setRecipes([generated]);
-        setSelectedRecipe(generated);
-        setSelectedIndex(0);
-        setLastSearchQuery(query);
-        setHasSearched(true);
-        setBotMessage(data.bot_message || "Your tailored recipe is ready.");
+        setRecipe(generated);
+        setBotMessage(
+          data.bot_message ||
+            "Your tailored recipe is ready — inspired by the closest matches in our dataset."
+        );
       }
     } catch (err) {
-      console.error("Generation error:", err);
-      setGenerateError("Could not generate a recipe. Check that the backend is running and GEMINI_API_KEY is set.");
+      console.error("Recipe error:", err);
+      setError(
+        "Could not get a recipe. Check that the backend is running and GEMINI_API_KEY is set in Backend/.env."
+      );
       setBotMessage("");
     } finally {
-      setIsGenerating(false);
+      setIsLoading(false);
     }
   };
 
   const handleSaveRecipe = async () => {
-    if (!selectedRecipe) return;
+    if (!recipe) return;
 
-    const user = getUser();
-    if (!user) {
-      setSaveStatus("Please sign in to save recipes to your account.");
+    if (!isAuthenticated) {
+      setSaveStatus("Sign in to save recipes.");
       return;
     }
 
-    setSaveStatus("Saving recipe...");
+    setSaveStatus("Saving…");
     try {
-      const response = await authFetch("/api/auth/saved-recipes", {
-        method: "POST",
-        body: JSON.stringify({ recipe: selectedRecipe, notes: lastSearchQuery }),
-      });
-      const data = await response.json();
+      const { ok, data } = await saveRecipeToAccount(recipe as Record<string, unknown>, lastQuery);
       setSaveStatus(
-        data.success
-          ? "Recipe saved to your account. View it under Saved recipes."
-          : `Save failed: ${data.detail || data.error || "unknown error"}`
+        ok && data.success
+          ? "Saved to your account — view it under Saved recipes."
+          : parseApiError(data, "Save failed")
       );
     } catch (err) {
       console.error("Save error:", err);
-      setSaveStatus("Unable to save recipe. Please try again later.");
+      setSaveStatus("Unable to save right now. Please try again.");
     }
   };
 
-  const handleRecipeSelect = (recipe: Recipe, index: number) => {
-    setSelectedRecipe(recipe);
-    setSelectedIndex(index);
-    setSaveStatus("");
-  };
+  const selectedCuisineLabel =
+    ALL_CUISINES.find((opt) => opt.value === cuisine)?.label || "Any cuisine";
 
   return (
-    <div className="min-h-screen bg-slate-50 py-10">
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <header className="mb-10 rounded-[2rem] bg-white/90 p-8 shadow-sm shadow-slate-200 border border-slate-200">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-            <div>
-              <p className="text-sm uppercase tracking-[0.24em] text-emerald-600">Smart cooking</p>
-              <h1 className="mt-3 text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
-                Generate complete recipes from your pantry
-              </h1>
-              <p className="mt-4 max-w-2xl text-lg leading-8 text-slate-600">
-                Add ingredients, pick a cuisine and dietary needs, then generate a full recipe with unique name,
-                measured ingredients, and step-by-step instructions from prep through serving.
-              </p>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="rounded-3xl bg-slate-50 p-5 text-center shadow-sm">
-                <p className="text-3xl font-bold text-slate-900">{recipes.length}</p>
-                <p className="mt-2 text-sm text-slate-500">Shown recipes</p>
-              </div>
-              <div className="rounded-3xl bg-slate-50 p-5 text-center shadow-sm">
-                <p className="text-3xl font-bold text-slate-900">{selectedRecipe?.is_generated ? "AI" : "Classic"}</p>
-                <p className="mt-2 text-sm text-slate-500">Selected recipe type</p>
-              </div>
-            </div>
-          </div>
+    <div className="min-h-screen bg-[#faf7f2] pb-16">
+      <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
+        <header className="border-b border-[#e8dfd4] py-10 text-center sm:py-14">
+          <p className="text-xs font-semibold uppercase tracking-[0.32em] text-[#c94c4c]">
+            What are you cooking tonight?
+          </p>
+          <h1 className="font-brand mt-4 text-4xl font-bold leading-tight text-[#2d2d2d] sm:text-5xl">
+            Turn your pantry into dinner
+          </h1>
+          <p className="mx-auto mt-4 max-w-2xl text-base leading-7 text-[#6b635a] sm:text-lg">
+            List what you have, pick a cuisine and dietary needs, then get one complete recipe —
+            measured ingredients and clear steps from prep through serving.
+          </p>
+          {!authLoading && isAuthenticated && user ? (
+            <p className="mt-4 text-sm text-[#6b635a]">
+              Signed in as <span className="font-medium text-[#2d2d2d]">{user.email}</span>
+              {profile?.dietary_restriction ? (
+                <> · profile preference: {profile.dietary_restriction}</>
+              ) : null}
+            </p>
+          ) : !authLoading ? (
+            <p className="mt-4 text-sm text-[#6b635a]">
+              <Link href="/signin?next=/dashboard" className="font-semibold text-[#c94c4c] hover:underline">
+                Sign in
+              </Link>{" "}
+              to save recipes and sync dietary preferences.
+            </p>
+          ) : null}
         </header>
 
-        {error && (
-          <div className="mb-8 rounded-2xl bg-red-50 p-6 text-red-700 border border-red-200 shadow-sm">
-            <p className="font-semibold flex items-center gap-2">Connection issue</p>
-            <p className="text-sm mt-1">{error}</p>
-          </div>
-        )}
-
-        <div className="rounded-[2rem] bg-black p-8 shadow-lg border-2 border-black mb-8 text-white">
-          <div className="mb-6 space-y-3">
-            <p className="text-sm uppercase tracking-[0.32em] text-slate-400">Recipe builder</p>
-            <h2 className="text-2xl font-bold tracking-tight text-white">Ingredients, cuisine & dietary filters</h2>
-            <p className="text-sm leading-6 text-slate-300 max-w-2xl">
-              List what you have (comma-separated). Choose a cuisine for authentic flavor. Generate creates one
-              complete original recipe — not a copy from the dataset.
+        <div className="mt-10 grid gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] lg:items-start">
+          <section className="rt-panel rounded-2xl p-6 sm:p-8">
+            <h2 className="font-brand text-2xl font-semibold text-[#2d2d2d]">Your pantry</h2>
+            <p className="mt-2 text-sm leading-6 text-[#6b635a]">
+              Comma-separated ingredients work best. We search 1,500+ corpus recipes semantically,
+              then compose something new for you.
             </p>
-          </div>
 
-          <div className="flex flex-col gap-4">
-            <label htmlFor="ingredient-search" className="block text-sm font-semibold text-white">
-              Pantry ingredients
+            <label htmlFor="pantry-input" className="mt-6 block text-sm font-semibold text-[#2d2d2d]">
+              Ingredients
             </label>
-            <input
-              id="ingredient-search"
-              value={searchIngredients}
-              onChange={(e) => setSearchIngredients(e.target.value)}
+            <textarea
+              id="pantry-input"
+              rows={3}
+              value={pantryInput}
+              onChange={(e) => setPantryInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") handleGenerateRecipe();
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  handleGetRecipe();
+                }
               }}
-              className="w-full rounded-2xl border border-white/15 bg-slate-950 px-4 py-3 text-white shadow-inner shadow-black/20 focus:border-white focus:ring-2 focus:ring-white/20 focus:outline-none placeholder:text-slate-500"
-              placeholder="e.g. chicken, garlic, coconut milk, spinach"
+              placeholder="e.g. chicken thighs, coconut milk, spinach, garlic, rice"
+              className="mt-2 w-full resize-y rounded-xl border border-[#e8dfd4] bg-[#faf7f2] px-4 py-3 text-[#2d2d2d] placeholder:text-[#a89f94] focus:border-[#c94c4c] focus:outline-none focus:ring-2 focus:ring-[#c94c4c]/20"
             />
 
-            <label htmlFor="cuisine-select" className="block text-sm font-semibold text-white">
-              Cuisine style
-            </label>
-            <select
-              id="cuisine-select"
-              value={cuisine}
-              onChange={(e) => setCuisine(e.target.value)}
-              className="w-full rounded-2xl border border-white/15 bg-slate-950 px-4 py-3 text-white focus:border-white focus:ring-2 focus:ring-white/20 focus:outline-none"
-            >
-              {CUISINE_OPTIONS.map((opt) => (
-                <option key={opt.value || "any"} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-
-            <p className="text-sm font-semibold text-white">Dietary restrictions (optional)</p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {dietaryOptions.map((option) => (
-                <label
-                  key={option.value}
-                  className="inline-flex cursor-pointer items-center gap-3 rounded-2xl border border-white/15 bg-slate-900 px-4 py-3 text-sm text-white shadow-sm transition hover:border-white/30"
-                >
-                  <input
-                    type="checkbox"
-                    checked={dietaryRestrictions.includes(option.value)}
-                    onChange={() => toggleRestriction(option.value)}
-                    className="h-4 w-4 rounded border-white/30 bg-slate-950 text-emerald-500 focus:ring-emerald-400"
-                  />
-                  <span>{option.label}</span>
-                </label>
-              ))}
-            </div>
-
-            {generateError && (
-              <p className="text-sm text-red-300">{generateError}</p>
-            )}
-
-            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-              <button
-                type="button"
-                onClick={handleGenerateRecipe}
-                disabled={isGenerating}
-                className="rounded-2xl bg-emerald-500 px-6 py-3 font-semibold text-black transition hover:bg-emerald-400 disabled:bg-slate-700 disabled:text-slate-400"
-              >
-                {isGenerating ? "Generating recipe…" : "Generate complete recipe"}
-              </button>
-              <button
-                type="button"
-                onClick={handleSearch}
-                disabled={searching}
-                className="rounded-2xl bg-white px-6 py-3 font-semibold text-black transition hover:bg-slate-200 disabled:bg-slate-700 disabled:text-slate-300"
-              >
-                {searching ? "Searching…" : "Search dataset"}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {loading ? (
-          <div className="grid gap-4">
-            <Loader label="Loading recipes" />
-          </div>
-        ) : recipes.length > 0 ? (
-          <div className="grid gap-4">
-            {browseMessage ? (
-              <p className="text-sm text-slate-600 px-2">{browseMessage}</p>
-            ) : null}
-            {recipes.map((recipe, index) => (
-              <div key={`${recipe.title}-${index}`} className="space-y-4">
-                <RecipeCard
-                  recipe={recipe}
-                  selected={selectedIndex === index}
-                  onClick={() => handleRecipeSelect(recipe, index)}
-                />
-                {selectedIndex === index && selectedRecipe ? (
-                  <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm shadow-slate-200">
-                    <RecipeDetail
-                      recipe={selectedRecipe}
-                      statusMessage={saveStatus || undefined}
-                      botMessage={botMessage || undefined}
-                    />
-                    <div className="mt-6 grid gap-4">
-                      <button
-                        type="button"
-                        onClick={handleSaveRecipe}
-                        className="w-full rounded-3xl bg-emerald-600 px-6 py-4 text-sm font-semibold text-white transition hover:bg-emerald-700"
-                      >
-                        Save recipe
-                      </button>
-                      {selectedRecipe.is_generated ? (
+            <div className="mt-8">
+              <p className="text-sm font-semibold text-[#2d2d2d]">Cuisine style</p>
+              <p className="mt-1 text-xs text-[#6b635a]">
+                Selected: <span className="font-medium text-[#c94c4c]">{selectedCuisineLabel}</span>
+              </p>
+              <div className="mt-3 space-y-4">
+                {CUISINE_GROUPS.map((group) => (
+                  <div key={group.label}>
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.22em] text-[#a89f94]">
+                      {group.label}
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {group.options.map((opt) => (
                         <button
+                          key={opt.value || "any"}
                           type="button"
-                          onClick={handleGenerateRecipe}
-                          disabled={isGenerating}
-                          className="w-full rounded-3xl bg-slate-900 px-6 py-4 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:bg-slate-300"
+                          onClick={() => setCuisine(opt.value)}
+                          className={`rt-chip rounded-full px-3 py-1.5 text-sm ${
+                            cuisine === opt.value ? "rt-chip-active" : ""
+                          }`}
                         >
-                          {isGenerating ? "Generating…" : "Generate another variation"}
+                          {opt.label}
                         </button>
-                      ) : null}
+                      ))}
                     </div>
                   </div>
-                ) : null}
+                ))}
               </div>
-            ))}
-          </div>
-        ) : hasSearched ? (
-          <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
-            <p className="text-slate-600">No dataset matches. Use Generate complete recipe to create one from your pantry.</p>
-            {lastSearchQuery ? (
-              <button
-                type="button"
-                onClick={handleGenerateRecipe}
-                disabled={isGenerating}
-                className="mt-4 rounded-2xl bg-white border border-slate-300 px-6 py-3 font-semibold text-slate-900 hover:bg-slate-100 disabled:opacity-50"
-              >
-                Create recipe from these ideas
-              </button>
+            </div>
+
+            <div className="mt-8">
+              <p className="text-sm font-semibold text-[#2d2d2d]">Dietary filters</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {DIETARY_OPTIONS.map((option) => {
+                  const active = dietaryRestrictions.includes(option.value);
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => toggleRestriction(option.value)}
+                      className={`rt-chip rounded-full px-3 py-1.5 text-sm ${
+                        active ? "rt-chip-active" : ""
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {error ? (
+              <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                {error}
+              </div>
             ) : null}
+
             <button
               type="button"
-              onClick={handleGenerateRecipe}
-              disabled={isGenerating}
-              className="mt-6 rounded-2xl bg-emerald-600 px-6 py-3 font-semibold text-white hover:bg-emerald-700 disabled:bg-slate-300"
+              onClick={handleGetRecipe}
+              disabled={isLoading}
+              className="rt-btn-primary mt-8 w-full rounded-xl px-6 py-4 text-base font-semibold shadow-sm"
             >
-              {isGenerating ? "Generating…" : "Generate complete recipe"}
+              {isLoading ? "Getting your recipe…" : "Get recipe"}
             </button>
-          </div>
-        ) : (
-          <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-slate-600">
-            Enter ingredients above, select cuisine, then click Generate — or Search dataset for existing matches.
-          </div>
-        )}
+            <p className="mt-3 text-center text-xs text-[#a89f94]">
+              Ctrl+Enter to submit
+            </p>
+          </section>
+
+          <section className="min-h-[320px]">
+            {isLoading ? (
+              <div className="rt-panel flex min-h-[320px] items-center justify-center rounded-2xl p-8">
+                <Loader label="Composing your recipe" />
+              </div>
+            ) : recipe ? (
+              <div className="space-y-4">
+                <RecipeDetail
+                  recipe={recipe}
+                  statusMessage={saveStatus || undefined}
+                  botMessage={botMessage || undefined}
+                />
+                <div className="flex flex-wrap items-center justify-end gap-3">
+                  {!isAuthenticated ? (
+                    <Link
+                      href="/signin?next=/dashboard"
+                      className="text-sm font-semibold text-[#c94c4c] hover:underline"
+                    >
+                      Sign in to save
+                    </Link>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={handleSaveRecipe}
+                    disabled={!isAuthenticated}
+                    className="rounded-xl border border-[#e8dfd4] bg-white px-5 py-3 text-sm font-semibold text-[#2d2d2d] transition hover:border-[#c94c4c] hover:text-[#c94c4c] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Save recipe
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="rt-panel flex min-h-[320px] flex-col items-center justify-center rounded-2xl p-8 text-center">
+                <p className="font-brand text-2xl font-semibold text-[#2d2d2d]">Your recipe appears here</p>
+                <p className="mt-3 max-w-sm text-sm leading-6 text-[#6b635a]">
+                  Add pantry ingredients on the left, choose filters if you like, then hit{" "}
+                  <strong className="font-semibold text-[#c94c4c]">Get recipe</strong>.
+                </p>
+                <div className="mt-8 grid w-full max-w-md gap-3 sm:grid-cols-3">
+                  {["One-pot dinners", "Quick & easy", "Cosy comfort"].map((idea) => (
+                    <button
+                      key={idea}
+                      type="button"
+                      onClick={() => setPantryInput(idea.toLowerCase())}
+                      className="rt-chip rounded-xl px-3 py-3 text-xs font-medium"
+                    >
+                      {idea}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   );

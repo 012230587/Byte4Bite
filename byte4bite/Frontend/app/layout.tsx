@@ -1,19 +1,19 @@
 import type { Metadata } from "next";
-import { Inter, Anton, Playfair_Display } from "next/font/google";
+import { Inter, Playfair_Display } from "next/font/google";
 import "./globals.css";
 import Navbar from "@/components/Navbar";
+import { AuthProvider } from "@/contexts/AuthContext";
 
-const inter = Inter({ subsets: ["latin"] });
-const display = Anton({ subsets: ["latin"], weight: ["400"], variable: "--font-display" });
+const inter = Inter({ subsets: ["latin"], variable: "--font-geist-sans" });
 const playfair = Playfair_Display({
   subsets: ["latin"],
-  weight: ["700"],
+  weight: ["400", "600", "700"],
   variable: "--font-brand",
 });
 
 export const metadata: Metadata = {
-  title: "Byte4Bite | AI Recipe Generator",
-  description: "Generate healthy recipes with AI",
+  title: "Byte4Bite | Quick recipes from your pantry",
+  description: "Turn what you have into a complete recipe with AI-powered semantic search and composition.",
 };
 
 export default function RootLayout({
@@ -23,9 +23,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`${inter.className} ${display.className} ${playfair.className} bg-slate-50 text-slate-900`}>
-        <Navbar />
-        <main>{children}</main>
+      <body className={`${inter.className} ${playfair.variable} bg-[#faf7f2] text-[#2d2d2d] antialiased`}>
+        <AuthProvider>
+          <Navbar />
+          <main>{children}</main>
+        </AuthProvider>
       </body>
     </html>
   );

@@ -125,6 +125,7 @@ _validate_recipe_integrity = dataset_search.validate_recipe
 def get_personalized_recipes(
     query: Optional[str] = None,
     restrictions: Optional[list[str]] = None,
+    user_id: Optional[int] = None,
 ):
     """
     Browse mode (GET /api/recipes): return up to 20 existing corpus recipes.
@@ -134,7 +135,7 @@ def get_personalized_recipes(
 
     try:
         RecipeRepository.log_search(
-            user_id=None,
+            user_id=user_id,
             query_text=query or "",
             search_mode="browse",
         )
@@ -183,6 +184,7 @@ def compose_recipe_from_query(
     query: str,
     restrictions: Optional[list[str]] = None,
     cuisine: Optional[str] = None,
+    user_id: Optional[int] = None,
 ) -> dict:
     """
     Compose mode (POST /api/recipes/generate): one tailored AI recipe from vector context.
@@ -191,7 +193,7 @@ def compose_recipe_from_query(
 
     try:
         RecipeRepository.log_search(
-            user_id=None,
+            user_id=user_id,
             query_text=query,
             search_mode="compose",
         )

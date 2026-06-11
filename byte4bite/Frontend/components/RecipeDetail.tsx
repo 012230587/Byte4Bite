@@ -11,8 +11,6 @@ interface RecipeDetailProps {
     cuisine?: string;
     inspired_by?: string[];
     retrieval_note?: string;
-    similarity_score?: number;
-    search_mode?: string;
   } | null;
   statusMessage?: string;
   botMessage?: string;
@@ -20,15 +18,7 @@ interface RecipeDetailProps {
 
 export default function RecipeDetail({ recipe, statusMessage, botMessage }: RecipeDetailProps) {
   if (!recipe) {
-    return (
-      <div className="rounded-[2rem] border border-slate-200 bg-white/90 p-6 shadow-sm shadow-slate-200">
-        <div className="text-slate-900 text-lg font-semibold mb-3">Recipe Preview</div>
-        <p className="text-slate-600 leading-relaxed">
-          Select a recipe from the list or generate a custom dish from your ingredients to see step-by-step culinary directions here.
-        </p>
-        {statusMessage ? <p className="mt-4 text-sm text-emerald-700">{statusMessage}</p> : null}
-      </div>
-    );
+    return null;
   }
 
   const ingredients = Array.isArray(recipe.ingredients)
@@ -47,90 +37,96 @@ export default function RecipeDetail({ recipe, statusMessage, botMessage }: Reci
     : [];
 
   return (
-    <div className="rounded-[2rem] border border-slate-200 bg-white/95 p-6 shadow-sm shadow-slate-200">
-      <div className="flex items-start justify-between gap-4 mb-4">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-900">{recipe.title}</h2>
-          <p className="mt-2 text-slate-600">{recipe.description || "A chef-crafted recipe ready for your kitchen."}</p>
-          {recipe.cuisine ? (
-            <p className="mt-2 text-xs uppercase tracking-[0.2em] text-emerald-600">{recipe.cuisine} cuisine</p>
-          ) : null}
-        </div>
-        <div className="rounded-3xl bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm">
-          {recipe.is_generated ? "AI-Generated" : "Recipe"}
+    <article className="rt-panel overflow-hidden rounded-2xl">
+      <div className="border-b border-[#e8dfd4] bg-[#f3ebe0] px-6 py-5 sm:px-8">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-[#c94c4c]">
+              {recipe.cuisine ? `${recipe.cuisine} · ` : ""}
+              {recipe.prep_time || "30 mins"} · {recipe.difficulty || "Easy"}
+            </p>
+            <h2 className="font-brand mt-2 text-3xl font-bold leading-tight text-[#2d2d2d]">
+              {recipe.title}
+            </h2>
+            <p className="mt-3 text-[#6b635a] leading-relaxed">
+              {recipe.description || "A complete home-cooked dish built from your pantry."}
+            </p>
+          </div>
+          <span className="rounded-full bg-[#c94c4c] px-3 py-1 text-xs font-semibold uppercase tracking-wide text-white">
+            Tailored
+          </span>
         </div>
       </div>
 
-      {botMessage ? (
-        <div className="mb-6 rounded-3xl bg-sky-50 border border-sky-100 px-4 py-3 text-sm text-sky-900">
-          <p className="font-semibold text-sky-950 mb-1">Byte4Bite</p>
-          <p>{botMessage}</p>
-        </div>
-      ) : null}
+      <div className="space-y-6 px-6 py-6 sm:px-8">
+        {botMessage ? (
+          <div className="rounded-xl border border-[#e8dfd4] bg-[#faf7f2] px-4 py-3 text-sm text-[#2d2d2d]">
+            <p className="font-semibold text-[#c94c4c]">Byte4Bite</p>
+            <p className="mt-1 leading-relaxed">{botMessage}</p>
+          </div>
+        ) : null}
 
-      {recipe.inspired_by && recipe.inspired_by.length > 0 ? (
-        <div className="mb-6 rounded-3xl bg-amber-50 border border-amber-100 px-4 py-3">
-          <p className="text-xs uppercase tracking-[0.2em] text-amber-700 mb-2">Inspired by</p>
-          <ul className="list-disc list-inside text-sm text-amber-950 space-y-1">
-            {recipe.inspired_by.map((title) => (
-              <li key={title}>{title}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
+        {recipe.inspired_by && recipe.inspired_by.length > 0 ? (
+          <div className="rounded-xl border border-[#e8dfd4] bg-white px-4 py-3">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-[#a89f94]">
+              Inspired by corpus matches
+            </p>
+            <ul className="mt-2 flex flex-wrap gap-2">
+              {recipe.inspired_by.map((title) => (
+                <li
+                  key={title}
+                  className="rounded-full bg-[#f3ebe0] px-3 py-1 text-xs font-medium text-[#6b635a]"
+                >
+                  {title}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
-      {recipe.retrieval_note ? (
-        <p className="mb-6 text-sm text-slate-500 italic">{recipe.retrieval_note}</p>
-      ) : null}
-
-      <div className="grid gap-4 sm:grid-cols-2 mb-6">
-        <div className="rounded-3xl bg-slate-50 p-4">
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-500 mb-2">Prep & difficulty</p>
-          <div className="text-slate-900 font-semibold">{recipe.prep_time || "30 mins"}</div>
-          <div className="mt-1 text-slate-600">{recipe.difficulty || "Easy"}</div>
-        </div>
-        <div className="rounded-3xl bg-slate-50 p-4">
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-500 mb-2">Tags</p>
+        {(recipe.dietary_tags || []).length > 0 ? (
           <div className="flex flex-wrap gap-2">
-            {(recipe.dietary_tags || []).map((tag) => (
-              <span key={tag} className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
+            {recipe.dietary_tags!.map((tag) => (
+              <span
+                key={tag}
+                className="rounded-full border border-[#e8dfd4] bg-[#faf7f2] px-3 py-1 text-xs font-semibold text-[#6b635a]"
+              >
                 {tag}
               </span>
             ))}
-            {!recipe.dietary_tags?.length ? (
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-500">No tags</span>
-            ) : null}
           </div>
-        </div>
+        ) : null}
+
+        <section>
+          <h3 className="font-brand text-xl font-semibold text-[#2d2d2d]">Ingredients</h3>
+          <ul className="mt-4 space-y-2">
+            {ingredients.map((ingredient, index) => (
+              <li
+                key={`${ingredient}-${index}`}
+                className="flex gap-3 rounded-lg border border-[#f3ebe0] bg-[#faf7f2] px-4 py-2.5 text-sm text-[#2d2d2d]"
+              >
+                <span className="text-[#c94c4c]">•</span>
+                <span>{ingredient}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section>
+          <h3 className="font-brand text-xl font-semibold text-[#2d2d2d]">Method</h3>
+          <ol className="mt-4 list-decimal space-y-4 ps-5 text-[#2d2d2d] leading-relaxed">
+            {instructions.map((step, index) => (
+              <li key={`step-${index}`} className="ps-1">
+                {step.replace(/^\s*\d+[\).]\s*/, "")}
+              </li>
+            ))}
+          </ol>
+        </section>
+
+        {statusMessage ? (
+          <p className="rounded-xl bg-[#f3ebe0] px-4 py-3 text-sm text-[#6b635a]">{statusMessage}</p>
+        ) : null}
       </div>
-
-      <section className="mb-6">
-        <h3 className="text-lg font-semibold text-slate-900 mb-3">Ingredients</h3>
-        <div className="grid gap-2 sm:grid-cols-2">
-          {ingredients.map((ingredient, index) => (
-            <div key={`${ingredient}-${index}`} className="rounded-3xl bg-slate-50 px-4 py-3 text-sm text-slate-700">
-              {ingredient}
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section>
-        <h3 className="text-lg font-semibold text-slate-900 mb-3">Cooking Steps</h3>
-        <ol className="rounded-3xl border border-slate-100 bg-white p-6 shadow-sm list-decimal list-outside ms-5 space-y-4">
-          {instructions.map((step, index) => (
-            <li key={`step-${index}`} className="text-slate-700 leading-relaxed ps-2">
-              {step.replace(/^\s*\d+[\).]\s*/, "")}
-            </li>
-          ))}
-        </ol>
-      </section>
-
-      {statusMessage ? (
-        <div className="mt-6 rounded-3xl bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-          {statusMessage}
-        </div>
-      ) : null}
-    </div>
+    </article>
   );
 }

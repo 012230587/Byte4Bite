@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from typing import List, Optional
 
+from api.deps import get_optional_user_id
 from services import ai_service, memory_service
 from .schemas import GenerateRecipeResponse, RecipeResponse
 from services import recipe_service
@@ -59,7 +60,10 @@ def refine_recipe(recipe: dict):
 
 
 @router.post("/generate", response_model=GenerateRecipeResponse)
-def generate_recipe(user_input: dict):
+def generate_recipe(
+    user_input: dict,
+    user_id: Optional[int] = Depends(get_optional_user_id),
+):
     """
     Compose mode: retrieve top-K vector matches, then LLM writes one tailored recipe.
     Returns inspired_by titles and a bot_message for the dashboard.
@@ -87,7 +91,7 @@ def generate_recipe(user_input: dict):
         cuisine = (user_input.get("cuisine") or "").strip() or None
 
         payload = recipe_service.compose_recipe_from_query(
-            user_query, restrictions, cuisine=cuisine
+            user_query, restrictions, cuisine=cuisine, user_id=user_id
         )
         recipe = payload.get("recipe") or {}
         inspired_by = payload.get("inspired_by") or []

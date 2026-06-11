@@ -11,7 +11,10 @@ import jwt
 
 JWT_SECRET = os.getenv("JWT_SECRET", "byte4bite-dev-secret-change-in-production")
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = 72
+JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
+
+if JWT_SECRET == "byte4bite-dev-secret-change-in-production":
+    print("DEBUG: Using default JWT_SECRET — set JWT_SECRET in .env for production")
 
 
 def hash_password(password: str) -> str:

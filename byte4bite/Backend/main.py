@@ -53,16 +53,20 @@ def startup_load_recipes():
         print("DEBUG: MySQL unavailable — check .env and run database/schema.sql")
     recipe_service.preload_recipes()
 
-# This is the "Security Pass"
+# CORS — comma-separated origins in .env (default: local Next.js dev)
+_cors_raw = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001",
+)
+CORS_ORIGINS = [origin.strip() for origin in _cors_raw.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000", "http://127.0.0.1:3000",
-        "http://localhost:3001", "http://127.0.0.1:3001",
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Type"],
 )
 
 app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])

@@ -1,14 +1,15 @@
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 
+from api.deps import get_current_user_id
 from database.user_repository import UserRepository
 from services.auth_service import (
     create_access_token,
-    decode_token,
     hash_password,
     verify_password,
 )
+from services.profile_cache import get_cached_profile, invalidate_profile, set_cached_profile
 
 router = APIRouter()
 
@@ -34,14 +35,15 @@ class SaveRecipeRequest(BaseModel):
     notes: Optional[str] = ""
 
 
-def get_current_user_id(authorization: Optional[str] = Header(None)) -> int:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid authorization token")
-    token = authorization.removeprefix("Bearer ").strip()
-    payload = decode_token(token)
-    if not payload or "sub" not in payload:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return int(payload["sub"])
+def _load_profile(user_id: int) -> dict:
+    cached = get_cached_profile(user_id)
+    if cached:
+        return cached
+    profile = UserRepository.get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found")
+    set_cached_profile(user_id, profile)
+    return profile
 
 
 @router.post("/register")
@@ -79,11 +81,24 @@ async def login(body: LoginRequest):
     }
 
 
+@router.get("/me")
+async def get_me(user_id: int = Depends(get_current_user_id)):
+    profile = _load_profile(user_id)
+    return {
+        "success": True,
+        "user_id": profile["user_id"],
+        "email": profile["email"],
+        "profile": {
+            "dietary_restriction": profile.get("dietary_restriction"),
+            "allergies": profile.get("allergies") or [],
+            "health_goals": profile.get("health_goals") or [],
+        },
+    }
+
+
 @router.get("/profile")
 async def get_profile(user_id: int = Depends(get_current_user_id)):
-    profile = UserRepository.get_profile(user_id)
-    if not profile:
-        raise HTTPException(status_code=404, detail="User not found")
+    profile = _load_profile(user_id)
     return {"success": True, "profile": profile}
 
 
@@ -98,7 +113,9 @@ async def update_profile(
         allergies=body.allergies,
         health_goals=body.health_goals,
     )
+    invalidate_profile(user_id)
     profile = UserRepository.get_profile(user_id)
+    set_cached_profile(user_id, profile)
     return {"success": True, "profile": profile}
 
 

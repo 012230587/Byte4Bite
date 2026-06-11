@@ -20,6 +20,8 @@ from services.text_consolidation import (
     normalize_instruction_list,
     sanitize_recipe_instructions,
 )
+from services import dataset_search
+from services.method_templates import build_method_fallback_recipe, detect_cooking_method
 
 # Ensure .env is loaded when this module is imported directly (tests, scripts)
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -28,6 +30,7 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 GENERATION_MODEL = os.getenv("GENERATION_MODEL", "gemini-2.0-flash").strip()
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 MODEL_NAME = GENERATION_MODEL  # alias used across generate/format helpers
+GENERATION_POLISH = os.getenv("GENERATION_POLISH", "false").lower() in {"1", "true", "yes"}
 
 client = genai.Client(api_key=API_KEY) if (genai is not None and API_KEY) else None
 
@@ -217,17 +220,35 @@ def _build_reference_prompt(query_text: str, recipe_samples: list) -> str:
     if not recipe_samples:
         return ""
     context = [
-        "Use these corpus recipes as inspiration only — do not copy titles or steps verbatim:",
+        "Reference corpus recipes — mirror their cooking techniques (especially protein prep and sauce method):",
     ]
-    for index, sample in enumerate(recipe_samples, 1):
+    for index, sample in enumerate(recipe_samples[:3], 1):
         title = sample.get("title", "Recipe")
         desc = sample.get("description", "")
-        ingredients = ", ".join(sample.get("ingredients", [])[:8])
-        steps = sample.get("instructions", [])
-        method = steps[0][:180] if steps else ""
-        context.append(
-            f"{index}. {title}: {desc} Key ingredients: {ingredients}. Method hint: {method}"
+        ingredients = ", ".join(
+            (sample.get("ingredients") or [])[:10]
+            if isinstance(sample.get("ingredients"), list)
+            else str(sample.get("ingredients", ""))[:200].split(",")[:10]
         )
+        steps = sample.get("instructions") or []
+        if isinstance(steps, str):
+            steps = normalize_instruction_list(steps)
+        step_block = []
+        for step_num, step in enumerate(steps[:6], 1):
+            step_text = str(step).strip()[:320]
+            if step_text:
+                step_block.append(f"   {step_num}. {step_text}")
+        method = "\n".join(step_block) if step_block else "   (see ingredients for technique)"
+        context.append(
+            f"{index}. {title}\n"
+            f"   Summary: {desc[:200]}\n"
+            f"   Key ingredients: {ingredients}\n"
+            f"   Method from corpus:\n{method}"
+        )
+    context.append(
+        f"\nUser intent: {query_text}. "
+        "Compose ONE new recipe whose steps follow the same protein/sauce preparation flow as the references."
+    )
     return "\n".join(context)
 
 
@@ -858,7 +879,9 @@ def _generate_custom_recipe(
     prompt = _build_complete_recipe_prompt(query_text, restrictions, cuisine_norm, recipe_samples)
 
     if client is None:
-        return _fallback_generated_recipe(query_text, restrictions, cuisine_norm)
+        return _compose_recipe_from_corpus(
+            query_text, restrictions, cuisine_norm, recipe_samples, reason="no_gemini_client"
+        )
 
     try:
         response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
@@ -868,16 +891,22 @@ def _generate_custom_recipe(
         parsed = _ensure_recipe_contains_query_terms(parsed, query_text, restrictions, cuisine_norm)
         parsed = _enhance_recipe_quality(parsed, recipe_samples)
         parsed["is_generated"] = True
+        parsed["compose_mode"] = "llm"
 
-        polished = _polish_generated_recipe(parsed, query_text, restrictions, cuisine_norm)
-        if polished:
-            polished["is_generated"] = True
-            polished = _ensure_recipe_contains_query_terms(polished, query_text, restrictions, cuisine_norm)
-            return polished
+        if GENERATION_POLISH:
+            polished = _polish_generated_recipe(parsed, query_text, restrictions, cuisine_norm)
+            if polished:
+                polished["is_generated"] = True
+                polished["compose_mode"] = "llm_polished"
+                polished = _ensure_recipe_contains_query_terms(polished, query_text, restrictions, cuisine_norm)
+                return polished
         return parsed
     except Exception as e:
         print(f"DEBUG ERROR in _generate_custom_recipe: {e}")
-        return _fallback_generated_recipe(query_text, restrictions, cuisine_norm)
+        reason = "gemini_quota" if _is_quota_or_rate_error(e) else "llm_error"
+        return _compose_recipe_from_corpus(
+            query_text, restrictions, cuisine_norm, recipe_samples, reason=reason
+        )
 
 
 def adjust_recipe_for_restrictions(recipe: dict, restrictions: Optional[list[str]] = None) -> str:
@@ -1103,10 +1132,13 @@ def generate_new_recipe_from_query(
             )
             recipe_samples = [
                 r for r in recipe_samples
-                if _recipe_matches_restrictions(r, restriction_normalized)
+                if dataset_search.matches_dietary_restrictions(r, restriction_normalized)
             ]
-            recipe_samples = _filter_samples_by_cuisine(recipe_samples, cuisine_normalized)
-            print(f"DEBUG: RAG found {len(recipe_samples)} cuisine-aware samples")
+            if cuisine_normalized and cuisine_normalized not in {"", "fusion"}:
+                cuisine_matched = _filter_samples_by_cuisine(recipe_samples, cuisine_normalized)
+                if cuisine_matched:
+                    recipe_samples = cuisine_matched
+            print(f"DEBUG: RAG found {len(recipe_samples)} filtered samples")
         except Exception as e:
             print(f"DEBUG: RAG sampling failed: {e}")
             recipe_samples = []
@@ -1130,10 +1162,31 @@ def generate_new_recipe_from_query(
     if retrieval_note:
         recipe["retrieval_note"] = retrieval_note
 
-    bot_message = None
-    if inspired_by:
+    compose_mode = recipe.pop("compose_mode", "llm")
+    compose_reason = recipe.pop("compose_reason", None)
+
+    if compose_mode == "corpus_adapt":
         bot_message = (
-            f"Found {rag_count} similar recipes — composing a tailored dish inspired by: "
+            f"Adapted real cooking steps from «{inspired_by[0]}» for «{query_text}» "
+            f"(Gemini quota paused — using corpus method)."
+            if inspired_by
+            else f"Adapted corpus matches for «{query_text}» (AI rewrite temporarily unavailable)."
+        )
+    elif compose_mode == "corpus_hybrid":
+        bot_message = (
+            f"Merged corpus steps from «{inspired_by[0]}» with "
+            f"{detect_cooking_method(query_text, restriction_normalized).replace('_', ' ')} technique."
+            if inspired_by
+            else "Merged partial corpus matches with standard cooking technique."
+        )
+    elif compose_mode == "method_template":
+        method_label = detect_cooking_method(query_text, restriction_normalized).replace("_", " ")
+        bot_message = (
+            f"Built a {method_label} recipe from your pantry while Gemini quota renews."
+        )
+    elif inspired_by:
+        bot_message = (
+            f"Found {rag_count} similar recipes — composed a tailored dish inspired by: "
             f"{', '.join(inspired_by[:3])}{'…' if len(inspired_by) > 3 else ''}."
         )
     elif retrieval_note:
@@ -1141,12 +1194,17 @@ def generate_new_recipe_from_query(
     else:
         bot_message = "Composed a custom recipe from your pantry request."
 
+    if compose_reason == "gemini_quota":
+        quota_note = "Gemini free-tier quota exceeded — steps adapted from corpus matches."
+        recipe["retrieval_note"] = f"{recipe.get('retrieval_note') or ''} {quota_note}".strip()
+
     return {
         "recipe": recipe,
         "inspired_by": inspired_by[:TARGET_RAG_SAMPLES],
         "retrieval_note": retrieval_note,
         "rag_sample_count": rag_count,
         "bot_message": bot_message,
+        "compose_mode": compose_mode,
     }
 
 
@@ -1215,55 +1273,175 @@ def _parse_generated_recipe(response_text: str) -> dict:
     return recipe
 
 
+def _is_quota_or_rate_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "resource_exhausted" in text or "quota" in text
+
+
+def _merge_pantry_with_corpus(query_text: str, corpus_recipe: dict, cuisine: str) -> list[str]:
+    """Blend user pantry terms with relevant ingredients from the top corpus match."""
+    query_items = [q.strip() for q in query_text.split(",") if q.strip()]
+    estimated = [_estimate_ingredient_quantity(q) for q in query_items]
+    corpus_ings, _ = _normalize_recipe_fields(corpus_recipe)
+    query_blob = query_text.lower()
+    extras: list[str] = []
+    for ing in corpus_ings:
+        ing_l = ing.lower()
+        if any(term.lower() in ing_l or ing_l in term.lower() for term in query_items):
+            continue
+        if any(kw in ing_l for kw in ("sauce", "gravy", "stock", "broth", "cream", "tomato")):
+            extras.insert(0, ing)
+        elif any(kw in ing_l for kw in ("chicken", "beef", "garlic", "onion", "oil", "butter", "salt")):
+            extras.append(ing)
+        elif len(extras) < 8:
+            extras.append(ing)
+    cuisine_key = _normalize_cuisine(cuisine)
+    staples = CUISINE_STAPLES.get(cuisine_key, [])
+    merged = _dedupe_ordered(estimated + extras[:8] + staples[:3])
+    return merged[:14] if merged else estimated
+
+
+def _adapt_corpus_instructions(query_text: str, corpus_recipe: dict) -> list[str]:
+    """Use corpus cooking steps, prioritising protein/sauce technique for the user query."""
+    _, instructions = _normalize_recipe_fields(corpus_recipe)
+    if not instructions:
+        return []
+    if instructions_look_fragmented(instructions):
+        instructions = sanitize_recipe_instructions(instructions)
+
+    strong_terms = _extract_strong_query_ingredients(query_text)
+    query_words = {
+        w.lower()
+        for w in re.split(r"[\s,]+", query_text)
+        if len(w) > 2
+    }
+    scored: list[tuple[int, str]] = []
+    for step in instructions:
+        step_l = step.lower()
+        score = 0
+        for term in strong_terms:
+            if term in step_l:
+                score += 3
+        for word in query_words:
+            if word in step_l:
+                score += 1
+        if any(kw in step_l for kw in ("simmer", "sauce", "gravy", "season", "serve", "reduce")):
+            score += 1
+        scored.append((score, step))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    ordered = _dedupe_ordered([s for _, s in scored])
+    if len(ordered) >= 4:
+        return ordered[:6]
+
+    cleaned = [_clean_step_text(s) for s in instructions if _clean_step_text(s)]
+    return _dedupe_ordered(cleaned)[:6]
+
+
+def _compose_recipe_from_corpus(
+    query_text: str,
+    restrictions: Optional[list[str]],
+    cuisine: Optional[str],
+    recipe_samples: Optional[list],
+    reason: str = "llm_unavailable",
+) -> dict:
+    """
+    When Gemini is unavailable (quota/404), adapt the top vector match instead of a generic template.
+    Preserves real chicken/sauce/gravy prep steps from the corpus.
+    """
+    cuisine_norm = _normalize_cuisine(cuisine) or "fusion"
+    if not recipe_samples:
+        recipe = build_method_fallback_recipe(
+            query_text,
+            cuisine_norm,
+            restrictions,
+            compose_mode="method_template",
+            compose_reason=reason,
+        )
+        return _validate_generated_recipe(recipe, query_text, restrictions, cuisine_norm)
+
+    primary = recipe_samples[0]
+    source_title = str(primary.get("title", "Corpus Recipe"))
+    query_items = [q.strip() for q in query_text.split(",") if q.strip()]
+    main_item = query_items[0].title() if query_items else "Pantry"
+
+    ingredients = _merge_pantry_with_corpus(query_text, primary, cuisine_norm)
+    instructions = _adapt_corpus_instructions(query_text, primary)
+    if len(instructions) < 4:
+        secondary_steps: list[str] = []
+        for sample in recipe_samples[1:3]:
+            secondary_steps.extend(_adapt_corpus_instructions(query_text, sample))
+        instructions = _dedupe_ordered(instructions + secondary_steps)[:6]
+
+    method = detect_cooking_method(query_text, restrictions)
+    if len(instructions) < 4:
+        hybrid = build_method_fallback_recipe(
+            query_text,
+            cuisine_norm,
+            restrictions,
+            corpus_steps=instructions,
+            inspired_title=source_title,
+            compose_mode="corpus_hybrid",
+            compose_reason=reason,
+        )
+        hybrid["ingredients"] = ingredients
+        hybrid["title"] = (
+            f"{query_text.strip().title()[:45]} — {cuisine_norm.title()} Style"
+            if len(query_text) < 40
+            else f"{main_item} {cuisine_norm.title()} — from {source_title[:28]}"
+        )
+        hybrid["description"] = (
+            f"Blends corpus steps from «{source_title}» with {method.replace('_', ' ')} "
+            f"technique for «{query_text}»."
+        )
+        return _validate_generated_recipe(hybrid, query_text, restrictions, cuisine_norm)
+
+    if not instructions:
+        method_recipe = build_method_fallback_recipe(
+            query_text,
+            cuisine_norm,
+            restrictions,
+            inspired_title=source_title,
+            compose_reason=reason,
+        )
+        method_recipe["ingredients"] = ingredients
+        return _validate_generated_recipe(method_recipe, query_text, restrictions, cuisine_norm)
+
+    dish_hint = query_text.strip().title()
+    title = f"{dish_hint} — {cuisine_norm.title()} Style"
+    if len(title) > 70:
+        title = f"{main_item} {cuisine_norm.title()} — from {source_title[:30]}"
+
+    recipe = {
+        "title": title,
+        "description": (
+            f"Tailored from corpus match «{source_title}» for «{query_text}», "
+            f"keeping its cooking method for your ingredients."
+        ),
+        "ingredients": ingredients,
+        "instructions": instructions,
+        "prep_time": primary.get("prep_time") or f"{_estimate_total_cooking_time(ingredients)} mins",
+        "difficulty": primary.get("difficulty") or "Medium",
+        "is_generated": True,
+        "cuisine": cuisine_norm,
+        "compose_mode": "corpus_adapt",
+        "compose_reason": reason,
+    }
+    return _validate_generated_recipe(recipe, query_text, restrictions, cuisine_norm)
+
+
 def _fallback_generated_recipe(
     user_ingredients: str,
     restrictions: Optional[list[str]] = None,
     cuisine: Optional[str] = None,
 ) -> dict:
-    """Fallback recipe when AI generation fails — still uses full prep-to-serve steps."""
-    ingredients_list = [ing.strip() for ing in user_ingredients.split(",") if ing.strip()]
-    normalized_restrictions = _normalize_restrictions(restrictions)
+    """Last-resort fallback — technique template keyed to query intent."""
     cuisine_key = _normalize_cuisine(cuisine) or "fusion"
-
-    estimated = [_estimate_ingredient_quantity(ing) for ing in ingredients_list]
-    extras = list(CUISINE_STAPLES.get(cuisine_key, ["2 tbsp oil", "salt", "black pepper"]))
-    if "gluten-free" in normalized_restrictions:
-        extras = [e.replace("soy sauce", "tamari") for e in extras]
-    if "vegan" in normalized_restrictions:
-        extras = [e for e in extras if "fish sauce" not in e.lower()]
-
-    ingredients = _dedupe_ordered(estimated + extras)
-    main_item = ingredients_list[0].capitalize() if ingredients_list else "Pantry"
-
-    raw_instructions = [
-        "Gather all ingredients, cutting board, knife, and a large skillet or pot (3 mins).",
-        f"Wash and pat dry produce; peel and slice aromatics; cut {main_item} into even bite-sized pieces (10 mins).",
-        "Measure sauces and spices into small bowls so they are ready to add (3 mins).",
-        "Heat oil in the skillet over medium-high heat until it shimmers (2 mins).",
-        "Sauté garlic and ginger until fragrant but not browned (2 mins).",
-        f"Add {main_item} and harder vegetables; cook until lightly golden and nearly tender (10 mins).",
-        "Add any quick-cooking items and sauce; toss to coat and simmer until everything is cooked through (8 mins).",
-        "Taste and adjust salt, acid, and spice to balance the dish (2 mins).",
-        "Remove from heat and rest 2 minutes so flavors meld (2 mins).",
-        "Transfer to warm plates, garnish with fresh herbs if available, and serve immediately (2 mins).",
-    ]
-
-    temp_recipe = {"ingredients": ingredients, "instructions": raw_instructions}
-    processed_instructions = _normalize_cooking_steps(temp_recipe)
-    total_minutes = _estimate_total_cooking_time(ingredients)
-
-    title_seed = ingredients_list[0] if ingredients_list else "Pantry"
-    cuisine_title = cuisine_key.title() if cuisine_key != "fusion" else "Heritage"
-    title = f"{cuisine_title} {title_seed} Skillet Supper"
-
-    return {
-        "title": title,
-        "description": f"A complete {cuisine_key} home-cooked dish built from your pantry with balanced seasoning.",
-        "ingredients": ingredients,
-        "instructions": processed_instructions,
-        "prep_time": f"{total_minutes} mins",
-        "difficulty": "Easy",
-        "is_generated": True,
-        "cuisine": cuisine_key,
-        "dietary_tags": normalized_restrictions,
-    }
+    recipe = build_method_fallback_recipe(
+        user_ingredients,
+        cuisine_key,
+        restrictions,
+        compose_mode="method_template",
+        compose_reason="generic_fallback",
+    )
+    return _validate_generated_recipe(recipe, user_ingredients, restrictions, cuisine_key)

@@ -1,63 +1,57 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { clearSession, getUser } from "@/services/auth";
+import { useAuth } from "@/contexts/AuthContext";
 
 const Navbar = () => {
-  const [email, setEmail] = useState<string | null>(null);
-
-  useEffect(() => {
-    setEmail(getUser()?.email ?? null);
-  }, []);
+  const { user, loading, logout, isAuthenticated } = useAuth();
 
   return (
-    <nav className="sticky top-0 z-50 w-full border-b border-slate-200 bg-white/95 backdrop-blur-xl shadow-sm">
-      <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
-        <Link href="/" className="flex items-center gap-3 text-lg font-semibold text-slate-900">
-          <span className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-600 text-white shadow-sm">
-            B
-          </span>
-          <span>Byte4Bite</span>
+    <nav className="sticky top-0 z-50 w-full border-b border-[#e8dfd4] bg-[#faf7f2]/95 backdrop-blur-md">
+      <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
+        <Link href="/" className="font-brand text-2xl font-bold tracking-tight text-[#2d2d2d]">
+          Byte4Bite
         </Link>
+        <p className="hidden sm:block text-xs uppercase tracking-[0.28em] text-[#6b635a]">
+          Fast prep, big flavours
+        </p>
 
-        <div className="hidden md:flex items-center gap-4 text-sm font-medium text-slate-600">
-          <Link href="/" className="transition hover:text-emerald-600">
-            Home
+        <div className="flex items-center gap-3 text-sm font-medium text-[#6b635a]">
+          <Link href="/dashboard" className="hidden md:inline transition hover:text-[#c94c4c]">
+            Get recipe
           </Link>
-          <Link href="/dashboard" className="transition hover:text-emerald-600">
-            Dashboard
-          </Link>
-          {email ? (
+          {!loading && isAuthenticated && user ? (
             <>
-              <Link href="/profile" className="transition hover:text-emerald-600">
-                Profile
-              </Link>
-              <Link href="/saved" className="transition hover:text-emerald-600">
+              <span className="hidden lg:inline max-w-[160px] truncate text-xs text-[#a89f94]">
+                {user.email}
+              </span>
+              <Link href="/saved" className="transition hover:text-[#c94c4c]">
                 Saved
+              </Link>
+              <Link href="/profile" className="hidden sm:inline transition hover:text-[#c94c4c]">
+                Profile
               </Link>
               <button
                 type="button"
-                onClick={() => {
-                  clearSession();
-                  setEmail(null);
-                  window.location.href = "/signin";
-                }}
-                className="rounded-full border border-slate-300 px-4 py-2 text-slate-600 transition hover:bg-slate-50"
+                onClick={logout}
+                className="rounded-full border border-[#e8dfd4] px-3 py-1.5 transition hover:border-[#c94c4c] hover:text-[#c94c4c]"
               >
                 Sign out
               </button>
             </>
-          ) : (
+          ) : !loading ? (
             <>
-              <Link href="/register" className="rounded-full border border-emerald-600 px-4 py-2 text-emerald-600 transition hover:bg-emerald-50">
+              <Link href="/register" className="hidden sm:inline transition hover:text-[#c94c4c]">
                 Register
               </Link>
-              <Link href="/signin" className="rounded-full bg-emerald-600 px-4 py-2 text-white transition hover:bg-emerald-700">
+              <Link
+                href="/signin"
+                className="rounded-full bg-[#c94c4c] px-4 py-2 text-white transition hover:bg-[#b03f3f]"
+              >
                 Sign in
               </Link>
             </>
-          )}
+          ) : null}
         </div>
       </div>
     </nav>
