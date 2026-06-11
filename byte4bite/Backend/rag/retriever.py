@@ -1,8 +1,8 @@
 """
 MySQL-backed RAG retriever for Byte4Bite.
 
-Data flow (replaces in-memory CSV loading):
-  user query  →  text-embedding-004 (query vector)
+Data flow:
+  user query  →  gemini-embedding-001 (768-d query vector)
              →  RecipeRepository.keyword_search() (cheap pre-filter)
              →  RecipeRepository.vector_search() (numpy cosine on VARBINARY blobs)
              →  top-k recipe dicts  →  ai_service.generate_new_recipe_from_query()
@@ -15,26 +15,20 @@ import re
 from pathlib import Path
 from typing import Any, Optional, Union
 
-import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-try:
-    from google import genai
-except ImportError:
-    genai = None
-
-from database.recipe_repository import RecipeRepository, EMBEDDING_DIMENSION
+from database.recipe_repository import RecipeRepository
+from rag.embeddings import embed_text
 from services.text_consolidation import normalize_recipe_payload
-
-API_KEY = os.getenv("GEMINI_API_KEY")
-EMBEDDING_MODEL = "text-embedding-004"
-client = genai.Client(api_key=API_KEY) if (genai is not None and API_KEY) else None
 
 STOP_WORDS = {
     "and", "or", "with", "a", "the", "of", "for", "in", "to", "from", "by", "on", "is", "at", "as",
 }
+
+# Below this cosine similarity, retrieval confidence is considered low (Phase E).
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.42"))
 
 PdfPath = Union[str, Path]
 
@@ -195,23 +189,10 @@ def _normalize_text(text: str) -> str:
     return " ".join(tokens)
 
 
-def _embed_query(text: str) -> Optional[np.ndarray]:
-    """Embed the user query with text-embedding-004 (768-dim, L2-normalized)."""
-    if client is None:
-        return None
+def _embed_query(text: str):
+    """Embed the user query with the shared embedding model (768-dim, L2-normalized)."""
     try:
-        response = client.models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=text.strip(),
-        )
-        vec = np.array(response.embeddings[0].values, dtype=np.float32)
-        if vec.shape[0] != EMBEDDING_DIMENSION:
-            print(f"DEBUG: unexpected embedding dim {vec.shape[0]}")
-            return None
-        norm = np.linalg.norm(vec)
-        if norm > 0:
-            vec = vec / norm
-        return vec
+        return embed_text(text.strip())
     except Exception as exc:
         print(f"DEBUG: query embedding failed: {exc}")
         return None
@@ -232,49 +213,70 @@ def _normalize_results(recipes: list[dict]) -> list[dict]:
     return [normalize_recipe_payload(recipe) for recipe in recipes]
 
 
-def find_best_recipes(user_query: str, top_k: int = 3) -> list[dict]:
+def find_best_recipes_scored(
+    user_query: str,
+    top_k: int = 5,
+) -> tuple[list[dict], Optional[str]]:
     """
-    Retrieve the most relevant recipes from MySQL using hybrid search:
-      1. Exact title match (if any)
-      2. Keyword pre-filter on title/description/ingredients JSON
-      3. Vector cosine ranking on `asian_recipes.embedding`
+    Hybrid retrieval with similarity scores and optional low-confidence note.
+    Returns (recipes, retrieval_note).
     """
     query = (user_query or "").strip()
     if not query:
-        return _normalize_results(RecipeRepository.fetch_all(limit=top_k))
+        pool = RecipeRepository.fetch_all(limit=top_k)
+        normalized = _normalize_results(pool)
+        for recipe in normalized:
+            recipe["search_mode"] = "browse"
+        return normalized, None
 
     total = RecipeRepository.count()
     if total == 0:
         print("DEBUG: asian_recipes table is empty — run: python -m rag.ingest")
-        return []
+        return [], "Recipe corpus is empty. Ingest datasets first."
 
     print(f"DEBUG: RAG querying MySQL corpus ({total} recipes) for: {query!r}")
 
     exact = _exact_title_match(query)
     if exact:
-        return _normalize_results(exact[:top_k])
-
-    keyword_hits = RecipeRepository.keyword_search(query, limit=50)
-    if not keyword_hits:
-        print("DEBUG: no keyword hits; returning recent recipes")
-        return _normalize_results(RecipeRepository.fetch_all(limit=top_k))
+        results = _normalize_results(exact[:top_k])
+        for recipe in results:
+            recipe["search_mode"] = "browse"
+            recipe["similarity_score"] = 1.0
+        return results, None
 
     query_vec = _embed_query(query)
-    if query_vec is None:
-        return _normalize_results(keyword_hits[:top_k])
+    if query_vec is not None:
+        scored = RecipeRepository.vector_search_scored(query_vec, limit=top_k)
+        if scored:
+            top_score = scored[0][0]
+            results = _normalize_results([recipe for _, recipe in scored])
+            note = None
+            if top_score < SIMILARITY_THRESHOLD:
+                note = (
+                    "Limited semantic matches in the corpus; results are best-effort. "
+                    "Try Generate for a tailored recipe."
+                )
+            print(f"DEBUG: vector search returned {len(results)} recipes (top={top_score:.3f})")
+            return results, note
 
-    candidate_ids = [r["id"] for r in keyword_hits if r.get("id")]
-    vector_hits = RecipeRepository.vector_search(
-        query_vec,
-        limit=top_k,
-        candidate_ids=candidate_ids or None,
-    )
+    keyword_hits = RecipeRepository.keyword_search(query, limit=top_k)
+    if keyword_hits:
+        results = _normalize_results(keyword_hits[:top_k])
+        for recipe in results:
+            recipe["search_mode"] = "keyword"
+        return results, "Keyword matches only — semantic index unavailable for this query."
 
-    if vector_hits:
-        print(f"DEBUG: vector search returned {len(vector_hits)} recipes")
-        return _normalize_results(vector_hits[:top_k])
+    print("DEBUG: no vector/keyword hits; returning recent recipes")
+    fallback = _normalize_results(RecipeRepository.fetch_all(limit=top_k))
+    for recipe in fallback:
+        recipe["search_mode"] = "fallback"
+    return fallback, "No close matches found; showing recent corpus recipes."
 
-    return _normalize_results(keyword_hits[:top_k])
+
+def find_best_recipes(user_query: str, top_k: int = 3) -> list[dict]:
+    """Retrieve the most relevant recipes from MySQL using hybrid vector-first search."""
+    recipes, _note = find_best_recipes_scored(user_query, top_k=top_k)
+    return recipes
 
 
 def find_recipes_for_ingredients(ingredients_str: str, top_k: int = 5) -> list[dict]:

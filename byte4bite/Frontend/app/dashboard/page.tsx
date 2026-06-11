@@ -15,6 +15,10 @@ interface Recipe {
   dietary_tags?: string[];
   cuisine?: string;
   is_generated?: boolean;
+  inspired_by?: string[];
+  retrieval_note?: string;
+  similarity_score?: number;
+  search_mode?: string;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
@@ -49,6 +53,8 @@ export default function Dashboard() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<string>("");
+  const [botMessage, setBotMessage] = useState<string>("");
+  const [browseMessage, setBrowseMessage] = useState<string>("");
   const [hasSearched, setHasSearched] = useState(false);
   const [lastSearchQuery, setLastSearchQuery] = useState("");
 
@@ -68,6 +74,7 @@ export default function Dashboard() {
   const fetchRecipes = useCallback(async (ingredientsQuery: string = "") => {
     setLoading(true);
     setError(null);
+    setBotMessage("");
     try {
       const queryParams = new URLSearchParams();
       if (ingredientsQuery) queryParams.set("ingredients", ingredientsQuery);
@@ -81,9 +88,19 @@ export default function Dashboard() {
       if (list.length > 0) {
         setSelectedRecipe(list[0]);
         setSelectedIndex(0);
+        setBrowseMessage(
+          ingredientsQuery
+            ? `Similar recipes in our database (${list.length} ranked matches).`
+            : "Browse recipes from the dataset corpus."
+        );
       } else {
         setSelectedRecipe(null);
         setSelectedIndex(null);
+        setBrowseMessage(
+          ingredientsQuery
+            ? "No close dataset matches — try Generate for a tailored recipe."
+            : ""
+        );
       }
     } catch (err) {
       console.error("Connection error:", err);
@@ -116,6 +133,8 @@ export default function Dashboard() {
     setIsGenerating(true);
     setGenerateError(null);
     setSaveStatus("");
+    setBrowseMessage("");
+    setBotMessage("Found similar recipes · composing your tailored dish…");
 
     try {
       const response = await fetch(`${API_BASE}/api/recipes/generate`, {
@@ -130,19 +149,26 @@ export default function Dashboard() {
       const data = await response.json();
       if (data.error && (!data.recipes || data.recipes.length === 0)) {
         setGenerateError(data.error);
+        setBotMessage("");
         return;
       }
       if (data.recipes && data.recipes.length > 0) {
-        const generated = data.recipes[0] as Recipe;
+        const generated = {
+          ...data.recipes[0],
+          inspired_by: data.inspired_by || data.recipes[0].inspired_by,
+          retrieval_note: data.retrieval_note || data.recipes[0].retrieval_note,
+        } as Recipe;
         setRecipes([generated]);
         setSelectedRecipe(generated);
         setSelectedIndex(0);
         setLastSearchQuery(query);
         setHasSearched(true);
+        setBotMessage(data.bot_message || "Your tailored recipe is ready.");
       }
     } catch (err) {
       console.error("Generation error:", err);
       setGenerateError("Could not generate a recipe. Check that the backend is running and GEMINI_API_KEY is set.");
+      setBotMessage("");
     } finally {
       setIsGenerating(false);
     }
@@ -306,6 +332,9 @@ export default function Dashboard() {
           </div>
         ) : recipes.length > 0 ? (
           <div className="grid gap-4">
+            {browseMessage ? (
+              <p className="text-sm text-slate-600 px-2">{browseMessage}</p>
+            ) : null}
             {recipes.map((recipe, index) => (
               <div key={`${recipe.title}-${index}`} className="space-y-4">
                 <RecipeCard
@@ -315,7 +344,11 @@ export default function Dashboard() {
                 />
                 {selectedIndex === index && selectedRecipe ? (
                   <div className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm shadow-slate-200">
-                    <RecipeDetail recipe={selectedRecipe} statusMessage={saveStatus || undefined} />
+                    <RecipeDetail
+                      recipe={selectedRecipe}
+                      statusMessage={saveStatus || undefined}
+                      botMessage={botMessage || undefined}
+                    />
                     <div className="mt-6 grid gap-4">
                       <button
                         type="button"
@@ -343,6 +376,16 @@ export default function Dashboard() {
         ) : hasSearched ? (
           <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
             <p className="text-slate-600">No dataset matches. Use Generate complete recipe to create one from your pantry.</p>
+            {lastSearchQuery ? (
+              <button
+                type="button"
+                onClick={handleGenerateRecipe}
+                disabled={isGenerating}
+                className="mt-4 rounded-2xl bg-white border border-slate-300 px-6 py-3 font-semibold text-slate-900 hover:bg-slate-100 disabled:opacity-50"
+              >
+                Create recipe from these ideas
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={handleGenerateRecipe}

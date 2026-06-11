@@ -25,8 +25,8 @@ from services.text_consolidation import (
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-GENERATION_MODEL = "gemini-3-flash"
-EMBEDDING_MODEL = "text-embedding-004"
+GENERATION_MODEL = os.getenv("GENERATION_MODEL", "gemini-2.0-flash").strip()
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 MODEL_NAME = GENERATION_MODEL  # alias used across generate/format helpers
 
 client = genai.Client(api_key=API_KEY) if (genai is not None and API_KEY) else None
@@ -216,13 +216,23 @@ def _preprocess_query(query: str) -> str:
 def _build_reference_prompt(query_text: str, recipe_samples: list) -> str:
     if not recipe_samples:
         return ""
-    context = ["Use these recipes only as inspiration and do not copy them:"]
-    for sample in recipe_samples:
-        title = sample.get('title', 'Recipe')
-        desc = sample.get('description', '')
-        ingredients = ', '.join(sample.get('ingredients', []))
-        context.append(f"- {title}: {desc}. Ingredients: {ingredients}.")
+    context = [
+        "Use these corpus recipes as inspiration only — do not copy titles or steps verbatim:",
+    ]
+    for index, sample in enumerate(recipe_samples, 1):
+        title = sample.get("title", "Recipe")
+        desc = sample.get("description", "")
+        ingredients = ", ".join(sample.get("ingredients", [])[:8])
+        steps = sample.get("instructions", [])
+        method = steps[0][:180] if steps else ""
+        context.append(
+            f"{index}. {title}: {desc} Key ingredients: {ingredients}. Method hint: {method}"
+        )
     return "\n".join(context)
+
+
+MIN_RAG_SAMPLES = 3
+TARGET_RAG_SAMPLES = 5
 
 
 def _normalize_cuisine(cuisine: Optional[str]) -> str:
@@ -764,8 +774,8 @@ CUISINE: {cuisine_line}
 Requirements:
 - TITLE: Unique, appetizing, specific name (not generic words like Stir-Fry, Delight, Bowl, or Chef Special).
 - INGREDIENTS: Full list with precise quantities — pantry items PLUS oil, salt, aromatics, and cuisine-appropriate extras (8–14 items). Follow [THE PANTRY] directives above.
-- INSTRUCTIONS: 10–14 numbered steps from gathering tools → washing/slicing → cooking → plating → serving.
-- Paraphrase reference context in fresh wording; do not copy dataset text verbatim.
+- INSTRUCTIONS: 5–6 numbered logical cooking phases from prep through serving (each phase 1–3 sentences).
+- Stitch reference context into one coherent dish matching the user intent — do not paste dataset text.
 - Honor every dietary restriction.
 
 Output EXACTLY this format (no extra text, no conversational filler):
@@ -775,8 +785,8 @@ INGREDIENTS:
 • [ingredient with quantity]
 • [ingredient with quantity]
 INSTRUCTIONS:
-1. [complete step with timing]
-2. [complete step with timing]
+1. [complete step]
+2. [complete step]
 ...
 PREP_TIME: [total time]
 DIFFICULTY: [Easy, Medium, or Hard]
@@ -1059,27 +1069,38 @@ def generate_new_recipe_from_query(
     recipe_samples: Optional[list] = None,
     restrictions: Optional[list[str]] = None,
     cuisine: Optional[str] = None,
-) -> list[dict]:
+) -> dict:
     """
-    Build one complete original recipe from pantry ingredients, dietary restrictions, and cuisine.
-    Uses RAG samples for inspiration only — output is always freshly written.
+    Compose mode: vector-ranked RAG context + LLM-authored recipe.
+    Returns recipe payload with inspired_by metadata for the API/UI.
     """
     restriction_normalized = _normalize_restrictions(restrictions)
     cuisine_normalized = _normalize_cuisine(cuisine) or "fusion"
     query_text = _preprocess_query(user_query)
 
     if not query_text:
-        return [_fallback_generated_recipe("", restriction_normalized, cuisine_normalized)]
+        fallback = _fallback_generated_recipe("", restriction_normalized, cuisine_normalized)
+        fallback["instructions"] = _normalize_cooking_steps(fallback)
+        return {
+            "recipe": fallback,
+            "inspired_by": [],
+            "retrieval_note": "Empty query — used fallback template.",
+            "rag_sample_count": 0,
+            "bot_message": "Please enter ingredients or a dish idea to compose a recipe.",
+        }
 
     print(
         f"DEBUG: generate_new_recipe_from_query query={query_text!r} "
         f"cuisine={cuisine_normalized} restrictions={restriction_normalized}"
     )
 
+    retrieval_note: Optional[str] = None
     if not recipe_samples:
         try:
             from rag import retriever
-            recipe_samples = retriever.find_recipes_for_ingredients(query_text, top_k=5)
+            recipe_samples, retrieval_note = retriever.find_best_recipes_scored(
+                query_text, top_k=TARGET_RAG_SAMPLES
+            )
             recipe_samples = [
                 r for r in recipe_samples
                 if _recipe_matches_restrictions(r, restriction_normalized)
@@ -1090,10 +1111,43 @@ def generate_new_recipe_from_query(
             print(f"DEBUG: RAG sampling failed: {e}")
             recipe_samples = []
 
+    inspired_by = [str(r.get("title", "")) for r in (recipe_samples or []) if r.get("title")]
+    rag_count = len(recipe_samples or [])
+
+    if rag_count < MIN_RAG_SAMPLES:
+        extra_note = (
+            f"Only {rag_count} corpus matches found (target {TARGET_RAG_SAMPLES}); "
+            "creating a best-effort composed recipe."
+        )
+        retrieval_note = f"{retrieval_note} {extra_note}".strip() if retrieval_note else extra_note
+
     recipe = _generate_custom_recipe(
         query_text, restriction_normalized, cuisine_normalized, recipe_samples
     )
-    return [recipe]
+    recipe["is_generated"] = True
+    recipe["instructions"] = _normalize_cooking_steps(recipe)
+    recipe["inspired_by"] = inspired_by[:TARGET_RAG_SAMPLES]
+    if retrieval_note:
+        recipe["retrieval_note"] = retrieval_note
+
+    bot_message = None
+    if inspired_by:
+        bot_message = (
+            f"Found {rag_count} similar recipes — composing a tailored dish inspired by: "
+            f"{', '.join(inspired_by[:3])}{'…' if len(inspired_by) > 3 else ''}."
+        )
+    elif retrieval_note:
+        bot_message = retrieval_note
+    else:
+        bot_message = "Composed a custom recipe from your pantry request."
+
+    return {
+        "recipe": recipe,
+        "inspired_by": inspired_by[:TARGET_RAG_SAMPLES],
+        "retrieval_note": retrieval_note,
+        "rag_sample_count": rag_count,
+        "bot_message": bot_message,
+    }
 
 
 def _parse_generated_recipe(response_text: str) -> dict:

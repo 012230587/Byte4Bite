@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS search_history (
     history_id   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     user_id      BIGINT UNSIGNED NULL COMMENT 'NULL for anonymous searches',
     query_text   VARCHAR(500)    NOT NULL,
+    search_mode  VARCHAR(32)     NULL DEFAULT 'browse' COMMENT 'browse | compose',
     searched_at  TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (history_id),
     KEY idx_search_history_user_time (user_id, searched_at DESC),
@@ -65,7 +66,7 @@ CREATE TABLE IF NOT EXISTS search_history (
 -- -----------------------------------------------------------------------------
 -- 4. Local Asian recipe knowledge base (RAG corpus)
 --    UNIQUE title prevents duplicate ingestion at the DB layer.
---    embedding: VARBINARY(3072) = 768 dimensions × 4 bytes (float32, text-embedding-004)
+--    embedding: VARBINARY(3072) = 768 dimensions × 4 bytes (gemini-embedding-001)
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS asian_recipes (
     recipe_id     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -78,7 +79,7 @@ CREATE TABLE IF NOT EXISTS asian_recipes (
     cuisine       VARCHAR(100)    NULL,
     dietary_tags  JSON            NULL COMMENT '["vegetarian","halal"]',
     source_file   VARCHAR(255)    NULL COMMENT 'Originating CSV filename',
-    embedding     VARBINARY(3072) NULL COMMENT 'text-embedding-004: np.float32[768].tobytes()',
+    embedding     VARBINARY(3072) NULL COMMENT 'gemini-embedding-001: np.float32[768].tobytes()',
     created_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (recipe_id),

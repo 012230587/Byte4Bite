@@ -1,5 +1,5 @@
 """
-Recipe service — search over MySQL corpus with CSV fallback when DB is sparse.
+Recipe service — vector-first browse and RAG-backed compose modes.
 """
 
 from __future__ import annotations
@@ -24,9 +24,13 @@ def invalidate_recipe_cache() -> None:
 def preload_recipes() -> None:
     try:
         count = RecipeRepository.count()
-        print(f"DEBUG: MySQL asian_recipes corpus: {count} rows")
+        stats = RecipeRepository.count_embedding_stats()
+        print(
+            f"DEBUG: MySQL asian_recipes corpus: {count} rows "
+            f"(embeddings valid={stats['valid_embeddings']})"
+        )
         if count < MIN_DB_RECIPES:
-            print("DEBUG: Low recipe count — run: python -m rag.ingest --no-embed")
+            print("DEBUG: Low recipe count — run: python -m rag.ingest")
     except Exception as exc:
         print(f"DEBUG: Could not load recipe corpus: {exc}")
 
@@ -41,15 +45,7 @@ def _load_csv_corpus() -> list[dict]:
     return _CSV_CACHE or []
 
 
-def _load_all_recipes() -> list[dict]:
-    count = RecipeRepository.count()
-    if count >= MIN_DB_RECIPES:
-        return RecipeRepository.fetch_search_pool()
-    return _load_csv_corpus()
-
-
 def _get_search_corpus() -> list[dict]:
-    """Prefer MySQL; merge CSV if database is still sparse."""
     db_count = RecipeRepository.count()
     if db_count >= MIN_DB_RECIPES:
         return RecipeRepository.fetch_search_pool()
@@ -68,8 +64,6 @@ def _normalize_output_recipe(recipe: dict) -> dict:
     normalized = normalize_recipe_payload(dict(recipe))
     instructions = normalized.get("instructions", [])
 
-    # Layer 1: regex sanitization already applied in normalize_recipe_payload.
-    # Layer 2: LLM stitching when steps still look like newline/timing fragments.
     if instructions_look_fragmented(instructions):
         try:
             stitched = ai_service.stitch_recipe_instructions_with_llm(
@@ -107,46 +101,65 @@ def _normalize_restrictions(restrictions: Optional[list[str]] = None) -> list[st
     return normalized
 
 
-# Re-export for backward compatibility
+def _apply_restriction_filter(recipes: list[dict], restrictions: list[str]) -> list[dict]:
+    if not restrictions:
+        return recipes
+    return [
+        recipe for recipe in recipes
+        if dataset_search.matches_dietary_restrictions(recipe, restrictions)
+    ]
+
+
+def _vector_browse(query: str, restrictions: list[str], limit: int = 20) -> list[dict]:
+    """Phase B: vector-first ranked browse of existing corpus recipes."""
+    semantic, _note = retriever.find_best_recipes_scored(query, top_k=limit * 2)
+    filtered = _apply_restriction_filter(semantic, restrictions)
+    ranked = dataset_search.search_and_rank(filtered, query, restrictions, limit=limit)
+    print(f"DEBUG: browse mode query={query!r} -> {len(ranked)} vector-ranked results")
+    return [_normalize_output_recipe(r) for r in ranked]
+
+
 _validate_recipe_integrity = dataset_search.validate_recipe
 
 
-def get_personalized_recipes(query: Optional[str] = None, restrictions: Optional[list[str]] = None):
+def get_personalized_recipes(
+    query: Optional[str] = None,
+    restrictions: Optional[list[str]] = None,
+):
+    """
+    Browse mode (GET /api/recipes): return up to 20 existing corpus recipes.
+    Uses vector-first ranking when embeddings are available.
+    """
     normalized_restrictions = _normalize_restrictions(restrictions)
 
     try:
-        RecipeRepository.log_search(user_id=None, query_text=query or "")
+        RecipeRepository.log_search(
+            user_id=None,
+            query_text=query or "",
+            search_mode="browse",
+        )
     except Exception:
         pass
 
     if not query:
         corpus = _get_search_corpus()
         results = dataset_search.search_and_rank(corpus, None, normalized_restrictions, limit=20)
-        return [_normalize_output_recipe(r) for r in results]
+        output = [_normalize_output_recipe(r) for r in results]
+        for recipe in output:
+            recipe.setdefault("search_mode", "browse")
+        return output
+
+    embed_stats = RecipeRepository.count_embedding_stats()
+    if embed_stats.get("valid_embeddings", 0) > 0 and RecipeRepository.count() >= MIN_DB_RECIPES:
+        return _vector_browse(query, normalized_restrictions)
 
     candidates: list[dict] = []
-
-    # 1. MySQL keyword pull (fast pre-filter per ingredient term)
     try:
         if RecipeRepository.count() > 0:
             candidates = RecipeRepository.keyword_search(query, limit=500)
     except Exception as exc:
         print(f"DEBUG: keyword_search failed: {exc}")
 
-    # 2. RAG semantic boost when embeddings exist
-    try:
-        if RecipeRepository.count() >= MIN_DB_RECIPES:
-            semantic = retriever.find_best_recipes(query, top_k=30)
-            seen = {c.get("title", "").lower() for c in candidates}
-            for recipe in semantic:
-                key = recipe.get("title", "").lower()
-                if key and key not in seen:
-                    candidates.append(recipe)
-                    seen.add(key)
-    except Exception as exc:
-        print(f"DEBUG: semantic search skipped: {exc}")
-
-    # 3. Full corpus fallback when keyword/RAG returned little
     if len(candidates) < 5:
         corpus = _get_search_corpus()
         terms = dataset_search.parse_ingredient_terms(query)
@@ -160,8 +173,38 @@ def get_personalized_recipes(query: Optional[str] = None, restrictions: Optional
     results = dataset_search.search_and_rank(
         candidates, query, normalized_restrictions, limit=20
     )
-    print(f"DEBUG: search query={query!r} restrictions={normalized_restrictions} -> {len(results)} results")
-    return [_normalize_output_recipe(r) for r in results]
+    output = [_normalize_output_recipe(r) for r in results]
+    for recipe in output:
+        recipe.setdefault("search_mode", "keyword")
+    return output
+
+
+def compose_recipe_from_query(
+    query: str,
+    restrictions: Optional[list[str]] = None,
+    cuisine: Optional[str] = None,
+) -> dict:
+    """
+    Compose mode (POST /api/recipes/generate): one tailored AI recipe from vector context.
+    """
+    normalized_restrictions = _normalize_restrictions(restrictions)
+
+    try:
+        RecipeRepository.log_search(
+            user_id=None,
+            query_text=query,
+            search_mode="compose",
+        )
+    except Exception:
+        pass
+
+    result = ai_service.generate_new_recipe_from_query(
+        query,
+        None,
+        normalized_restrictions,
+        cuisine=cuisine,
+    )
+    return result
 
 
 def get_personalized_recommendation(query: str, restrictions: Optional[list[str]] = None):

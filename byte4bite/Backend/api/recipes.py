@@ -2,7 +2,7 @@ from fastapi import APIRouter, Query
 from typing import List, Optional
 
 from services import ai_service, memory_service
-from .schemas import RecipeResponse
+from .schemas import GenerateRecipeResponse, RecipeResponse
 from services import recipe_service
 
 router = APIRouter()
@@ -13,7 +13,11 @@ async def get_recipes(
     restrictions: Optional[List[str]] = Query(None),
     restriction: Optional[str] = Query(None)
 ):
-    """Standard Search: Finds matching recipes from CSV."""
+    """
+    Browse mode: return up to 20 existing corpus recipes ranked by vector similarity
+    when embeddings are available (falls back to keyword ranking otherwise).
+    Does not call the LLM composer.
+    """
     effective_restrictions = list(restrictions or [])
     if restriction:
         effective_restrictions.append(restriction)
@@ -54,16 +58,21 @@ def refine_recipe(recipe: dict):
         return {"formatted_recipe": ai_service._fallback_recipe_nicely(recipe)}
 
 
-@router.post("/generate")
+@router.post("/generate", response_model=GenerateRecipeResponse)
 def generate_recipe(user_input: dict):
     """
-    Generate recipes based on query: if recipe name, paraphrase existing; if ingredient, suggest paraphrased recipes.
+    Compose mode: retrieve top-K vector matches, then LLM writes one tailored recipe.
+    Returns inspired_by titles and a bot_message for the dashboard.
     """
     restrictions = None
     try:
         user_query = user_input.get("query", "").strip()
         if not user_query:
-            return {"error": "Please provide a query", "recipes": []}
+            return GenerateRecipeResponse(
+                error="Please provide a query",
+                recipes=[],
+                is_generated=True,
+            )
 
         restrictions = user_input.get("restrictions")
         if isinstance(restrictions, str):
@@ -77,10 +86,31 @@ def generate_recipe(user_input: dict):
 
         cuisine = (user_input.get("cuisine") or "").strip() or None
 
-        recipes = ai_service.generate_new_recipe_from_query(
-            user_query, None, restrictions, cuisine=cuisine
+        payload = recipe_service.compose_recipe_from_query(
+            user_query, restrictions, cuisine=cuisine
         )
-        return {"recipes": recipes, "is_generated": True}
+        recipe = payload.get("recipe") or {}
+        inspired_by = payload.get("inspired_by") or []
+        retrieval_note = payload.get("retrieval_note")
+        rag_count = int(payload.get("rag_sample_count") or 0)
+        bot_message = payload.get("bot_message")
+        if not bot_message:
+            if inspired_by:
+                bot_message = (
+                    f"I found {rag_count} similar recipes in our database and composed "
+                    f"a tailored recipe inspired by them."
+                )
+            else:
+                bot_message = "I composed a best-effort recipe from your pantry request."
+
+        return GenerateRecipeResponse(
+            recipes=[recipe],
+            is_generated=True,
+            inspired_by=inspired_by,
+            retrieval_note=retrieval_note,
+            bot_message=bot_message,
+            rag_sample_count=rag_count,
+        )
     except Exception as e:
         print(f"DEBUG: generate failed: {e}")
         cuisine = (user_input.get("cuisine") or "").strip() or None
@@ -89,7 +119,12 @@ def generate_recipe(user_input: dict):
             restrictions if isinstance(restrictions, list) else None,
             cuisine,
         )
-        return {"recipes": [fallback], "is_generated": True, "error": str(e)}
+        return GenerateRecipeResponse(
+            recipes=[fallback],
+            is_generated=True,
+            error=str(e),
+            bot_message="Generation used a fallback recipe due to an error.",
+        )
 
 @router.post("/memory/save")
 def save_memory_recipe(payload: dict):

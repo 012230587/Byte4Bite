@@ -1,1 +1,1 @@
-"""RAG package — CSV ingestion, embedding, and MySQL retrieval."""
+"""RAG package — CSV ingestion, embedding, backfill, and MySQL retrieval."""

@@ -5,8 +5,8 @@ Byte4Bite CSV → MySQL ingestion pipeline.
 Data flow:
   datasets/*.csv  →  csv_utils (parse rows)
                  →  RecipeRepository.title_exists() (dedupe by UNIQUE title)
-                 →  Google GenAI text-embedding-004 (title + ingredients)
-                 →  asian_recipes table (text + VECTOR embedding)
+                 →  gemini-embedding-001 (rich recipe document, 768-dim)
+                 →  asian_recipes table (text + VARBINARY embedding)
 
 Run from Backend/:
   python -m rag.ingest
@@ -22,7 +22,6 @@ import time
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 from dotenv import load_dotenv
 
 # Ensure Backend/ is on sys.path when executed as a script
@@ -32,56 +31,16 @@ if str(BACKEND_DIR) not in sys.path:
 
 load_dotenv(BACKEND_DIR / ".env")
 
-try:
-    from google import genai
-except ImportError:
-    genai = None
-
-import os
-
 from database.recipe_repository import RecipeRepository, EMBEDDING_DIMENSION
 from rag.csv_utils import DATASETS_DIR, iter_recipes_from_dataset, list_dataset_files
+from rag.embeddings import (
+    EMBEDDING_MODEL,
+    embed_recipe,
+    resolve_no_embed,
+    vector_to_bytes,
+    zero_embedding_bytes,
+)
 from services.text_consolidation import normalize_instruction_list, sanitize_recipe_instructions
-
-EMBEDDING_MODEL = "text-embedding-004"
-API_KEY = os.getenv("GEMINI_API_KEY")
-_client = genai.Client(api_key=API_KEY) if (genai and API_KEY) else None
-
-
-def _embed_recipe_text(title: str, ingredients: list[str]) -> np.ndarray:
-    """
-    Call Gemini text-embedding-004 on title + ingredients.
-    Returns a normalized float32 vector of length 768.
-    """
-    if _client is None:
-        raise RuntimeError("GEMINI_API_KEY missing or google-genai not installed.")
-
-    text = f"{title}. Ingredients: {', '.join(ingredients)}"
-    response = _client.models.embed_content(
-        model=EMBEDDING_MODEL,
-        contents=text,
-    )
-    values = response.embeddings[0].values
-    vec = np.array(values, dtype=np.float32)
-
-    if vec.shape[0] != EMBEDDING_DIMENSION:
-        raise ValueError(
-            f"Expected {EMBEDDING_DIMENSION}-dim embedding, got {vec.shape[0]}"
-        )
-
-    norm = np.linalg.norm(vec)
-    if norm > 0:
-        vec = vec / norm
-    return vec
-
-
-def _vector_to_bytes(vector: np.ndarray) -> bytes:
-    """Pack float32 embedding as binary blob (768 * 4 = 3072 bytes)."""
-    return np.array(vector, dtype=np.float32).tobytes()
-
-
-def _zero_embedding_bytes() -> bytes:
-    return np.zeros(EMBEDDING_DIMENSION, dtype=np.float32).tobytes()
 
 
 def _safe_console(text: str) -> str:
@@ -121,7 +80,7 @@ def clear_saved_recipe_data() -> dict[str, int]:
 
 def refresh_datasets_from_folder(
     *,
-    no_embed: bool = True,
+    no_embed: Optional[bool] = None,
     dry_run: bool = False,
     sleep_seconds: float = 0.0,
     clear_saved: bool = True,
@@ -166,8 +125,8 @@ def refresh_datasets_from_folder(
         file_stats = ingest_csv_files(
             csv_files=[csv_path],
             dry_run=dry_run,
-            no_embed=no_embed,
-            sleep_seconds=sleep_seconds if not no_embed else 0.0,
+            no_embed=resolve_no_embed(no_embed),
+            sleep_seconds=sleep_seconds if resolve_no_embed(no_embed) is False else 0.0,
         )
         totals["files_refreshed"] += 1
         for key in ("scanned", "skipped_existing", "skipped_invalid", "inserted", "errors"):
@@ -190,7 +149,7 @@ def refresh_datasets_from_folder(
 
 def sync_new_datasets(
     *,
-    no_embed: bool = True,
+    no_embed: Optional[bool] = None,
     dry_run: bool = False,
     sleep_seconds: float = 0.0,
 ) -> dict[str, int]:
@@ -217,8 +176,8 @@ def sync_new_datasets(
     stats = ingest_csv_files(
         csv_files=pending,
         dry_run=dry_run,
-        no_embed=no_embed,
-        sleep_seconds=sleep_seconds if not no_embed else 0.0,
+        no_embed=resolve_no_embed(no_embed),
+        sleep_seconds=sleep_seconds if resolve_no_embed(no_embed) is False else 0.0,
     )
     stats["files_synced"] = len(pending)
     print(
@@ -233,13 +192,14 @@ def ingest_csv_files(
     dry_run: bool = False,
     limit: Optional[int] = None,
     sleep_seconds: float = 0.05,
-    no_embed: bool = False,
+    no_embed: Optional[bool] = None,
     csv_files: Optional[list[Path]] = None,
 ) -> dict[str, int]:
     """
     Scan datasets/ CSV files, dedupe by title in MySQL, embed new rows, insert.
     Pass csv_files to ingest a subset (e.g. only newly added datasets).
     """
+    skip_embed = resolve_no_embed(no_embed)
     stats = {"scanned": 0, "skipped_existing": 0, "skipped_invalid": 0, "inserted": 0, "errors": 0}
 
     csv_files = sorted(csv_files) if csv_files else list_dataset_csv_files()
@@ -271,11 +231,17 @@ def ingest_csv_files(
                     stats["inserted"] += 1
                     continue
 
-                if no_embed:
-                    embedding_bytes = _zero_embedding_bytes()
+                if skip_embed:
+                    embedding_bytes = zero_embedding_bytes()
                 else:
-                    vector = _embed_recipe_text(title, recipe["ingredients"])
-                    embedding_bytes = _vector_to_bytes(vector)
+                    vector = embed_recipe(
+                        title=title,
+                        description=recipe.get("description", ""),
+                        ingredients=recipe["ingredients"],
+                        instructions=recipe.get("instructions", []),
+                        cuisine=recipe.get("cuisine"),
+                    )
+                    embedding_bytes = vector_to_bytes(vector)
 
                 # Sanitization layer: strip (X mins) noise and stitch newline fragments before DB write.
                 recipe["instructions"] = normalize_instruction_list(
@@ -345,10 +311,10 @@ def main() -> None:
     args = parser.parse_args()
 
     print("Byte4Bite Ingestion Pipeline")
-    print(f"  Embedding model : {EMBEDDING_MODEL if not args.no_embed else 'skipped'}")
+    print(f"  Embedding model : {EMBEDDING_MODEL if not resolve_no_embed(args.no_embed) else 'skipped'}")
     print(f"  Vector dimension: {EMBEDDING_DIMENSION}")
     print(f"  Dry run         : {args.dry_run}")
-    print(f"  No embed        : {args.no_embed}")
+    print(f"  No embed        : {resolve_no_embed(args.no_embed)}")
 
     if args.clear_saved_only or args.clear_memory:
         stats = clear_saved_recipe_data() if not args.dry_run else {

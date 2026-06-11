@@ -19,6 +19,11 @@ from services.text_consolidation import (
     parse_python_style_list,
 )
 
+# Lazy import to avoid circular dependency with rag.embeddings at module load.
+def _is_zero_embedding(blob: Optional[bytes]) -> bool:
+    from rag.embeddings import is_zero_embedding
+    return is_zero_embedding(blob)
+
 
 def _parse_stored_json_field(value: Any) -> Any:
     """Load JSON columns from MySQL; fall back to ast.literal_eval for legacy Python lists."""
@@ -312,14 +317,14 @@ class RecipeRepository:
             return [row_to_recipe(r) for r in rows]
 
     @staticmethod
-    def vector_search(
+    def vector_search_scored(
         query_vector: np.ndarray,
         limit: int = 10,
         candidate_ids: Optional[list[int]] = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[tuple[float, dict[str, Any]]]:
         """
         Cosine similarity search over VARBINARY embeddings (MySQL 8.0 compatible).
-        Ranks keyword-filtered candidates in Python using numpy dot product.
+        Returns (similarity_score, recipe_dict) pairs, highest first.
         """
         if query_vector.shape[0] != EMBEDDING_DIMENSION:
             return []
@@ -354,22 +359,123 @@ class RecipeRepository:
         scored: list[tuple[float, dict[str, Any]]] = []
         for row in rows:
             blob = row.get("embedding")
-            if not blob or len(blob) != EMBEDDING_BYTE_SIZE:
+            if _is_zero_embedding(blob):
                 continue
             vec = bytes_to_vector(blob)
-            # Vectors are L2-normalized at ingest; dot product == cosine similarity
             score = float(np.dot(query_vector, vec))
-            scored.append((score, row_to_recipe(row)))
+            recipe = row_to_recipe(row)
+            recipe["similarity_score"] = round(score, 4)
+            recipe["search_mode"] = "vector"
+            scored.append((score, recipe))
 
         scored.sort(key=lambda item: item[0], reverse=True)
-        return [recipe for _, recipe in scored[:limit]]
+        return scored[:limit]
 
     @staticmethod
-    def log_search(user_id: Optional[int], query_text: str) -> None:
+    def vector_search(
+        query_vector: np.ndarray,
+        limit: int = 10,
+        candidate_ids: Optional[list[int]] = None,
+    ) -> list[dict[str, Any]]:
+        """Cosine similarity search — returns recipes ranked by similarity."""
+        scored = RecipeRepository.vector_search_scored(
+            query_vector, limit=limit, candidate_ids=candidate_ids
+        )
+        return [recipe for _, recipe in scored]
+
+    @staticmethod
+    def log_search(
+        user_id: Optional[int],
+        query_text: str,
+        search_mode: str = "browse",
+    ) -> None:
+        mode = (search_mode or "browse").strip().lower()[:32]
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO search_history (user_id, query_text, search_mode)
+                    VALUES (%s, %s, %s)
+                    """,
+                    (user_id, query_text[:500], mode),
+                )
+            except Exception:
+                cursor.execute(
+                    "INSERT INTO search_history (user_id, query_text) VALUES (%s, %s)",
+                    (user_id, query_text[:500]),
+                )
+            cursor.close()
+
+    @staticmethod
+    def fetch_embedding_backfill_batch(
+        after_recipe_id: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Fetch corpus rows for embedding backfill (raw JSON fields preserved)."""
+        with get_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                f"""
+                SELECT recipe_id, title, description, ingredients, instructions,
+                       cuisine, embedding
+                FROM asian_recipes
+                WHERE {SEARCH_CORPUS_FILTER}
+                  AND recipe_id > %s
+                ORDER BY recipe_id
+                LIMIT %s
+                """,
+                (after_recipe_id, limit),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        return list(rows)
+
+    @staticmethod
+    def update_embedding(recipe_id: int, embedding_bytes: bytes) -> None:
+        """Persist a new embedding blob for one recipe."""
+        if len(embedding_bytes) != EMBEDDING_BYTE_SIZE:
+            raise ValueError(
+                f"embedding_bytes must be {EMBEDDING_BYTE_SIZE} bytes, got {len(embedding_bytes)}"
+            )
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO search_history (user_id, query_text) VALUES (%s, %s)",
-                (user_id, query_text[:500]),
+                """
+                UPDATE asian_recipes
+                SET embedding = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE recipe_id = %s
+                """,
+                (embedding_bytes, recipe_id),
             )
             cursor.close()
+
+    @staticmethod
+    def count_embedding_stats() -> dict[str, int]:
+        """Corpus embedding health for startup logs and backfill progress."""
+        stats = {"total_corpus": 0, "null_embeddings": 0, "valid_embeddings": 0, "needs_backfill": 0}
+        batch_size = 500
+        after_id = 0
+
+        while True:
+            rows = RecipeRepository.fetch_embedding_backfill_batch(
+                after_recipe_id=after_id,
+                limit=batch_size,
+            )
+            if not rows:
+                break
+
+            for row in rows:
+                stats["total_corpus"] += 1
+                blob = row.get("embedding")
+                if blob is None:
+                    stats["null_embeddings"] += 1
+                    stats["needs_backfill"] += 1
+                elif _is_zero_embedding(blob):
+                    stats["needs_backfill"] += 1
+                else:
+                    stats["valid_embeddings"] += 1
+
+            after_id = int(rows[-1]["recipe_id"])
+
+        return stats

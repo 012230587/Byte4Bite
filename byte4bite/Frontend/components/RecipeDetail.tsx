@@ -9,11 +9,16 @@ interface RecipeDetailProps {
     dietary_tags?: string[];
     is_generated?: boolean;
     cuisine?: string;
+    inspired_by?: string[];
+    retrieval_note?: string;
+    similarity_score?: number;
+    search_mode?: string;
   } | null;
   statusMessage?: string;
+  botMessage?: string;
 }
 
-export default function RecipeDetail({ recipe, statusMessage }: RecipeDetailProps) {
+export default function RecipeDetail({ recipe, statusMessage, botMessage }: RecipeDetailProps) {
   if (!recipe) {
     return (
       <div className="rounded-[2rem] border border-slate-200 bg-white/90 p-6 shadow-sm shadow-slate-200">
@@ -55,6 +60,28 @@ export default function RecipeDetail({ recipe, statusMessage }: RecipeDetailProp
           {recipe.is_generated ? "AI-Generated" : "Recipe"}
         </div>
       </div>
+
+      {botMessage ? (
+        <div className="mb-6 rounded-3xl bg-sky-50 border border-sky-100 px-4 py-3 text-sm text-sky-900">
+          <p className="font-semibold text-sky-950 mb-1">Byte4Bite</p>
+          <p>{botMessage}</p>
+        </div>
+      ) : null}
+
+      {recipe.inspired_by && recipe.inspired_by.length > 0 ? (
+        <div className="mb-6 rounded-3xl bg-amber-50 border border-amber-100 px-4 py-3">
+          <p className="text-xs uppercase tracking-[0.2em] text-amber-700 mb-2">Inspired by</p>
+          <ul className="list-disc list-inside text-sm text-amber-950 space-y-1">
+            {recipe.inspired_by.map((title) => (
+              <li key={title}>{title}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {recipe.retrieval_note ? (
+        <p className="mb-6 text-sm text-slate-500 italic">{recipe.retrieval_note}</p>
+      ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2 mb-6">
         <div className="rounded-3xl bg-slate-50 p-4">

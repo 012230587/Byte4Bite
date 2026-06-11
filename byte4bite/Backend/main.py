@@ -8,6 +8,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 AUTO_INGEST_ON_STARTUP = os.getenv("AUTO_INGEST_ON_STARTUP", "true").lower() in {"1", "true", "yes"}
 REFRESH_DATASETS_ON_STARTUP = os.getenv("REFRESH_DATASETS_ON_STARTUP", "false").lower() in {"1", "true", "yes"}
+EMBED_ON_INGEST = os.getenv("EMBED_ON_INGEST", "true").lower() in {"1", "true", "yes"}
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,16 +25,30 @@ def startup_load_recipes():
         print("DEBUG: MySQL connection OK")
         if AUTO_INGEST_ON_STARTUP:
             try:
+                no_embed = not EMBED_ON_INGEST
                 if REFRESH_DATASETS_ON_STARTUP:
                     from rag.ingest import refresh_datasets_from_folder
-                    stats = refresh_datasets_from_folder(no_embed=True, clear_saved=True)
+                    stats = refresh_datasets_from_folder(no_embed=no_embed, clear_saved=True)
                 else:
                     from rag.ingest import sync_new_datasets
-                    stats = sync_new_datasets(no_embed=True)
+                    stats = sync_new_datasets(no_embed=no_embed)
                 if stats.get("inserted", 0) > 0 or stats.get("removed_old_rows", 0) > 0:
                     recipe_service.invalidate_recipe_cache()
             except Exception as exc:
                 print(f"DEBUG: Auto dataset sync failed: {exc}")
+        try:
+            from database.recipe_repository import RecipeRepository
+            embed_stats = RecipeRepository.count_embedding_stats()
+            print(
+                "DEBUG: Embedding health — "
+                f"valid={embed_stats['valid_embeddings']}, "
+                f"needs_backfill={embed_stats['needs_backfill']}, "
+                f"corpus={embed_stats['total_corpus']}"
+            )
+            if embed_stats["needs_backfill"] > 0:
+                print("DEBUG: Run: python -m rag.backfill_embeddings")
+        except Exception as exc:
+            print(f"DEBUG: Embedding health check failed: {exc}")
     else:
         print("DEBUG: MySQL unavailable — check .env and run database/schema.sql")
     recipe_service.preload_recipes()
