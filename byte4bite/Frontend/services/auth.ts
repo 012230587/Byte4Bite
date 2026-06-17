@@ -164,7 +164,7 @@ export function invalidateAuthCache() {
   cacheInvalidate("auth:");
 }
 
-export async function saveRecipeToAccount(recipe: Record<string, unknown>, notes = "") {
+export async function saveRecipeToAccount(recipe: object, notes = "") {
   const res = await authFetch("/api/auth/saved-recipes", {
     method: "POST",
     body: JSON.stringify({ recipe, notes }),

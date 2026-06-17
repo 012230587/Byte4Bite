@@ -166,7 +166,7 @@ export default function Dashboard() {
 
     setSaveStatus("Saving…");
     try {
-      const { ok, data } = await saveRecipeToAccount(recipe as Record<string, unknown>, lastQuery);
+      const { ok, data } = await saveRecipeToAccount(recipe, lastQuery);
       setSaveStatus(
         ok && data.success
           ? "Saved to your account — view it under Saved recipes."

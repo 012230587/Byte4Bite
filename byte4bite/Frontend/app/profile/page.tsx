@@ -31,7 +31,7 @@ export default function ProfilePage() {
           setError(parseApiError(data, "Failed to load profile"));
           return;
         }
-        const p = data.profile as Profile;
+        const p = data.profile as unknown as Profile;
         setProfile(p);
         setDietaryRestriction(p.dietary_restriction || "");
         setAllergies((p.allergies || []).join(", "));
